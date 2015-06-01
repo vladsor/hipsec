@@ -1,0 +1,31 @@
+name:           ipsec-tools
+version:        0.0.0.1
+license:        BSD3
+license-file:   LICENSE
+maintainer:     Vladimir Sorokin <v.d.sorokin@gmail.com>
+synopsis:       Low-level networking interface
+description:    Low-level networking interface
+category:       Network
+build-type:     Simple
+cabal-version:  >=1.8
+homepage:       http://github.com/haskell/network
+bug-reports:    http://trac.haskell.org/network/
+
+library
+    exposed-modules: Message
+    build-depends: base >= 4.0.0.0, datetime >= 0.2.0, unix < 2.6, binary >= 0.5.0.0, 
+                   bytestring, network>=2.3.0.3, time, mtl
+
+
+Executable setkey
+    build-depends: base >= 4.0.0.0, datetime >= 0.2.0, unix < 2.6, binary >= 0.5.0.0, 
+                   bytestring, network, ipsec-tools, time, cmdargs, parsec
+
+    main-is: setkey.hs
+    buildable: True
+
+    ghc-options: -fwarn-incomplete-patterns
+
+source-repository head
+  type:     git
+  location: git://github.com/haskell/network.git
