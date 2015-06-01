@@ -1,4 +1,4 @@
-name:           ipsec-tools
+name:           hipsec
 version:        0.0.0.1
 license:        BSD3
 license-file:   LICENSE
@@ -12,7 +12,7 @@ homepage:       http://github.com/haskell/network
 bug-reports:    http://trac.haskell.org/network/
 
 library
-    exposed-modules: Network.Security.Message, Network.Security.Internal.PFSocket, Network.Security.PFKey
+    exposed-modules: Network.Security.Message, Network.Security.PFKey
     build-depends: base >= 4.0.0.0, datetime >= 0.2.0, unix, binary >= 0.5.0.0, 
                    bytestring, network>=2.3.0.3, time, mtl, ioctl, select
 
