@@ -1,10 +1,13 @@
-module PFKey where
+{-# LANGUAGE CPP, MultiParamTypeClasses #-}
+#include <sys/ioctl.h>
+
+module Network.Security.PFKey where
 
 import Network.Socket
 import qualified Network.Socket.ByteString.Lazy as BS
 import Network.Socket.Internal
 import Network.BSD
-import Message
+import Network.Security.Message
 import Foreign.Storable ( Storable(..) )
 import Foreign.Ptr
 import Foreign.Marshal.Alloc
@@ -18,30 +21,45 @@ import Data.Maybe
 import Data.DateTime
 import Text.Printf
 import qualified Data.Time.Clock as Clock
+import Network.Socket.IOCtl
+import System.Posix.IO.Select
+import System.Posix.IO.Select.FdSet
+import System.Posix.IO.Select.Types
+import Foreign.C.Types
+import System.Posix.Types
+
 import Debug.Trace
 
 _PF_KEY_V2 = 2 :: Int
 
 pfkey_open :: IO Socket
 pfkey_open = do
-  s <- socket AF_KEY Raw (fromIntegral _PF_KEY_V2)
+  s <- socket Pseudo_AF_KEY Raw (fromIntegral _PF_KEY_V2)
   setSocketOption s RecvBuffer (1024 * 1024)
   return s
 
 pfkey_close :: Socket -> IO ()
 pfkey_close = sClose
 
-_MSG_PEEK = 2
+data FIONREAD = FIONREAD
+
+instance IOControl FIONREAD CInt where
+  ioctlReq _ = (#const FIONREAD) :: CInt
+
+
 pfkey_recv :: Socket -> IO (Maybe Msg)
 pfkey_recv s = do
-  let hdrlen = sizeOf (undefined::Msg)
-  buf <- BS.recvEx s (fromIntegral hdrlen) _MSG_PEEK
-  if (LBS.length buf /= (fromIntegral hdrlen)) then return Nothing else do
+  let hdrlen = (sizeOf (undefined::Msg)) :: Int
+  ret <- select'' [Fd $ fdSocket s] [] [] (Time (CTimeval 10 0))
+  if (ret /= 1) then return Nothing else do
+  msglen <- (ioctlsocket' s FIONREAD) >>= return . fromIntegral
+  if (msglen < hdrlen) then return Nothing else do
+  buf <- BS.recv s (fromIntegral hdrlen)
   let hdr = decode buf
-  let msglen = ((msgLength hdr) `shift` 3)
-  buf' <- BS.recv s (fromIntegral msglen) --(fromIntegral bodylen)
-  if (LBS.length buf' /= (fromIntegral msglen)) then return Nothing else do
-  return $ Just $ decode buf'
+  let msglen = (msgLength hdr) `shift` 3
+  buf' <- BS.recv s $ fromIntegral $ msglen - hdrlen
+  if (LBS.length buf' /= fromIntegral (msglen - hdrlen)) then return Nothing else do
+  return $ Just $ decode $ buf `LBS.append` buf'
     
 pfkey_send :: Socket -> Msg -> IO ()
 pfkey_send s msg = BS.send s (encode msg) >> return ()
@@ -52,7 +70,8 @@ mkMsg typ satyp seq pid = defaultMsg { msgType = typ
                                      , msgLength = (sizeOf (undefined :: Msg)) `shiftR` 3
                                      , msgSeq = seq
                                      , msgPid = pid
-                                     }
+				     }
+                                     
 {-
 mkAddress :: ExtType -> SockAddr -> Int -> Int -> Address
 mkAddress exttype addr prefixlen proto = Address { addressLen = (sizeOf (undefined :: Address) + sizeOfSockAddr addr) `shiftR` 3
@@ -363,6 +382,3 @@ ipsec_dump_ipsecrequest (IPSecRequest proto mode level reqid (Just (addr1, addr2
   let ch = if (reqid > iPSecManualReqidMax) then '#' else ':'
   in
    putStrLn $ show proto ++ "/" ++ show mode ++ "/" ++ show addr1 ++ "-" ++ show addr2 ++ "/" ++ show level ++ [ch] ++ show reqid
-
-
-                    

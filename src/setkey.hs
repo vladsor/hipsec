@@ -1,8 +1,8 @@
 {-# LANGUAGE DeriveDataTypeable, FlexibleContexts #-}
 module Main (main) where
 
-import PFKey
-import Message
+import Network.Security.PFKey
+import Network.Security.Message
 import System.Console.CmdArgs
 import Control.Monad
 import Data.DateTime
@@ -24,9 +24,9 @@ data SetKey = SetKey { dump :: Bool
                      } deriving (Show, Data, Typeable)
 
 setkey = SetKey
-               {dump = def &= name "D"  &= help 
+               {dump = def &= name "D"  &= help
                        "Dump the SAD entries.  If -P is also specified, the SPD entries are dumped.  If -p is specified, the ports are displayed."
-               ,flush = def &= name "F" &= help 
+               ,flush = def &= name "F" &= help
                         "Flush the SAD entries.  If -P is also specified, the SPD entries are flushed."
                ,policy = def &= name "P" &= help "Policy entries"
                ,cmds = def &= name "c" &= help "read commands from stdin"
@@ -36,19 +36,19 @@ setkey = SetKey
     help "" &=
     summary "F-IPSec-Tools v0.0.0, (C) Vladimir Sorokin 2011" &=
     details ["",""
-            ,"",""] 
+            ,"",""]
 
 main :: IO ()
 main = do
   opts <- cmdArgs setkey
-  
+
   case policy opts of
     True -> do
       when (dump opts) $ do
         s <- pfkey_open
         pfkey_send_spddump s
         iterateM_ $ do
-          res <- pfkey_recv s 
+          res <- pfkey_recv s
           case res of
             Nothing -> print "Nothing\n" >> return False
             Just msg -> do
@@ -56,7 +56,7 @@ main = do
               pfkey_spd_dump msg
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
         pfkey_close s
-      return () 
+      return ()
       when (flush opts) $ do
         putStrLn "SPD Flush"
         s <- pfkey_open
@@ -67,7 +67,7 @@ main = do
         s <- pfkey_open
         pfkey_send_dump s SATypeUnspec
         iterateM_ $ do
-          res <- pfkey_recv s 
+          res <- pfkey_recv s
           case res of
             Nothing -> print "Nothing\n" >> return False
             Just msg -> do
@@ -82,7 +82,7 @@ main = do
 --        pfkey_send_flush s SATypeUnspec
         doCommand s CommandFlush
         pfkey_close s
-  
+
   when (cmds opts) $ do
     putStrLn "Read commands"
     raw <- getContents
@@ -90,7 +90,7 @@ main = do
       Left err -> print err
       Right xs -> do
         print xs
-        let xs' = filter (\i -> case i of 
+        let xs' = filter (\i -> case i of
               TokenComment _ -> False
               _ -> True) xs
         case (P.parse parser "" xs') of
@@ -106,7 +106,7 @@ doCommand s CommandFlush = pfkey_send_flush s SATypeUnspec
 doCommand s CommandDump = do
         pfkey_send_dump s SATypeUnspec
         iterateM_ $ do
-          res <- pfkey_recv s 
+          res <- pfkey_recv s
           case res of
             Nothing -> print "Nothing\n" >> return False
             Just msg -> do
@@ -118,7 +118,7 @@ doCommand s CommandSPDFlush = pfkey_send_flush s SATypeUnspec
 doCommand s CommandSPDDump = do
         pfkey_send_spddump s
         iterateM_ $ do
-          res <- pfkey_recv s 
+          res <- pfkey_recv s
           case res of
             Nothing -> print "Nothing\n" >> return False
             Just msg -> do
@@ -158,18 +158,18 @@ doCommand s (CommandSPDAdd (Address sproto prefs src) (Address droto prefd dst) 
 -}
 doCommand _ _ = error "doCommand error"
 
-data Token = Token { tknString :: String } 
+data Token = Token { tknString :: String }
            | TokenNumber { tknNumber :: Int }
-           | TokenEOC 
+           | TokenEOC
            | TokenSlash
            | TokenSqBrOpen
            | TokenSqBrClose
            | TokenDot
            | TokenComment { tknComment :: String }
            deriving (Eq, Show)
-                    
+
 separator = P.many1 (P.oneOf " \t\n")
-tokenize = P.many $ do 
+tokenize = P.many $ do
   P.optionMaybe separator
   tkn <- P.choice [ P.char ';' >> return TokenEOC
                   , P.char '#' >> P.many (P.noneOf "\n") >>= return . TokenComment
@@ -178,8 +178,8 @@ tokenize = P.many $ do
                   , P.char '[' >> return TokenSqBrOpen
                   , P.char ']' >> return TokenSqBrClose
                   , P.char '.' >> return TokenDot
-                  , P.many1 P.digit >>= return . TokenNumber . (foldl (\a b -> a * 10 + digitToInt b) 0)  
-                  , P.many1 (P.noneOf " \t\n;#-/[].") >>= return . Token 
+                  , P.many1 P.digit >>= return . TokenNumber . (foldl (\a b -> a * 10 + digitToInt b) 0)
+                  , P.many1 (P.noneOf " \t\n;#-/[].") >>= return . Token
                   ]
   P.optionMaybe separator
   return tkn
@@ -242,17 +242,17 @@ cmdSPDFlush = token "spdflush" >> return CommandSPDFlush
 cmdSPDDump :: P.Stream s m Token => P.ParsecT s u m Command
 cmdSPDDump = token "spddump" >> return CommandSPDDump
 
-parser = 
+parser =
   P.many1 (do
               cmd <- P.choice [ cmdFlush
-                              , cmdDump 
+                              , cmdDump
                               , cmdSPDFlush
-                              , cmdSPDDump 
-                                --               , cmdAdd 
+                              , cmdSPDDump
+                                --               , cmdAdd
                                 --                , cmdGet
-                                --                , cmdDelete 
-                                --                , cmdDeleteAll 
-                              , cmdSPDAdd 
+                                --                , cmdDelete
+                                --                , cmdDeleteAll
+                              , cmdSPDAdd
                                 --                , cmdSPDDelete
                               ]
               tokenEOC
@@ -279,7 +279,7 @@ cmdAdd = do
   auth <- string
   many1 separator
   authKey <- key
-  
+
   return $ CommandAdd { addSrc = src
                       , addDst = dst
                       , addProto = proto
@@ -299,14 +299,14 @@ cmdGet = do
                       , getProto = proto
                       , getSPI = spi
                       }
-  
+
 cmdDelete = do
   return $ CommandDelete { deleteSrc = src
                          , deleteDst = dst
                          , deleteProto = proto
                          , deleteSPI = spi
                          }
-  
+
 cmdDeleteAll = do
   return $ CommandDeleteAll { deleteAllSrc = src
                             , deleteAllDst = dst
@@ -315,11 +315,11 @@ cmdDeleteAll = do
 -}
 
 split :: Char -> String -> [String]
-split c s = 
+split c s =
   let
     split' acc "" "" = acc
     split' acc ps "" = acc ++ [ps]
-    split' acc ps (f:s') = 
+    split' acc ps (f:s') =
       if f == c then
         split' (acc ++ [ps]) "" s'
       else
@@ -328,12 +328,12 @@ split c s =
 
 {-
 trHostAddress :: String -> Maybe HostAddress
-trHostAddress s = 
+trHostAddress s =
   let
     p = split '.' s
     n :: [Int]
-    n = reverse $ fmap read p  
-    a = foldl (\s a -> shift s 8 .|. a) 0 n 
+    n = reverse $ fmap read p
+    a = foldl (\s a -> shift s 8 .|. a) 0 n
   in
    if length p /= 4 then Nothing
    else Just (fromIntegral a)
@@ -347,7 +347,7 @@ tokenIP = do
   v3 <- tokenNumber
   tokenDot
   v4 <- tokenNumber
-  return $ fromIntegral $ v1 .|. v2 `shift` 8 .|. v3 `shift` 16 .|. v4 `shift` 24 
+  return $ fromIntegral $ v1 .|. v2 `shift` 8 .|. v3 `shift` 16 .|. v4 `shift` 24
 
 tokenPolicy :: P.Stream s m Token => P.ParsecT s u m Policy
 tokenPolicy = do
@@ -358,7 +358,7 @@ tokenPolicy = do
   str <- tokenString
 --  pol <- P.choice $ fmap token ["discard", "none", "ipsec"]
   let pol = (read str) :: IPSecPolicy
-  proto <- P.choice $ fmap token ["ah", "esp", "ipcomp"] 
+  proto <- P.choice $ fmap token ["ah", "esp", "ipcomp"]
   tokenSlash
 --  mode <- P.choice $ fmap token ["tunnel", "transport"]
   str <- tokenString
@@ -370,11 +370,11 @@ tokenPolicy = do
     dst <- tokenIP
     return (SockAddrInet 0 src, SockAddrInet 0 dst)
   tokenSlash
-  
+
   str <- tokenString
 --  level <- P.choice $ fmap token ["default", "use", "require", "unique"]
   let level = (read str) :: IPSecLevel
-             
+
   let req = IPSecRequest { ipsecreqProto = 0
                          , ipsecreqMode = mode
                          , ipsecreqLevel = level
@@ -387,7 +387,7 @@ tokenPolicy = do
                   , policyPriority = 0
                   , policyIPSecRequests = [req]
                   }
-  
+
 tokenAddressRange :: P.Stream s m Token => P.ParsecT s u m Address
 tokenAddressRange = do
   ip <- tokenIP

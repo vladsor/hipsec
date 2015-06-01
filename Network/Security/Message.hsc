@@ -4,7 +4,7 @@
 #include <linux/ipsec.h>
 #include <netinet/in.h>
 
-module Message (
+module Network.Security.Message (
   Msg(..)
   , MsgType(..)
   , Address(..)
@@ -321,7 +321,7 @@ instance Binary Msg where
      
 --     trace (show hdr) $ 
      if bodylen > 0 then do
-       buf <- uncheckedLookAhead bodylen 
+       buf <- getLazyByteString bodylen 
        if (LBS.length buf /= bodylen) then return hdr
          else do
          repeateL (fromIntegral bodylen, hdr) updateMsgCnt
@@ -331,7 +331,7 @@ instance Binary Msg where
 
 updateMsgCnt :: (Int, Msg) -> Get (Int, Msg)
 updateMsgCnt (left, msg) = do
-  hdr <- uncheckedLookAhead 4
+  hdr <- getLazyByteString 4
   let (extlen, exttype) = flip runGet hdr (do
                                               len <- getWord16le 
                                               typ <- getWord16le
