@@ -1,11 +1,13 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE RecordWildCards #-}
 
 #include <linux/pfkeyv2.h>
 #include <linux/ipsec.h>
 #include <netinet/in.h>
 
-module Network.Security.Message (
-  Msg(..)
+module Network.Security.Message 
+  ( Msg(..)
+  , MsgHdr(..)
   , MsgType(..)
   , Address(..)
   , Policy(..)
@@ -39,6 +41,7 @@ module Network.Security.Message (
   
 import Foreign.Storable ( Storable(..) )
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString as BS
 import Data.Binary
 import Data.Binary.Get
 import Data.Binary.Put
@@ -47,11 +50,25 @@ import Control.Monad (liftM)
 import Debug.Trace
 import Data.Bits
 import Control.Monad
-import Data.DateTime
-import Network.Socket
-import Network.Socket.Internal
 import qualified Control.Monad.State as St
 import Data.Maybe
+
+import Data.Time.Clock
+import Data.Time.Clock.POSIX
+import Data.Time.Format
+import Network.Socket (SockAddr(..), packFamily, unpackFamily, PortNumber(..), Family(..))
+import Network.Socket.Internal (sizeOfSockAddrByFamily)
+import Data.Monoid ((<>))
+
+data MsgHdr = MsgHdr
+  { msgHdrVersion :: Int
+  , msgHdrType :: MsgType
+  , msgHdrErrno :: Int
+  , msgHdrSatype :: SAType
+  , msgHdrLength :: Int
+  , msgHdrSeq :: Int
+  , msgHdrPid :: Int
+  } deriving (Show, Eq)
 
 data Msg = Msg 
   { msgVersion :: Int
@@ -227,6 +244,29 @@ instance Storable Msg where
      #{poke struct sadb_msg, sadb_msg_seq} ptr seq 
      #{poke struct sadb_msg, sadb_msg_pid} ptr pid 
       -}
+
+
+instance Binary MsgHdr where
+   put msg@(MsgHdr {..}) = do
+     putWord8 $ fromIntegral msgHdrVersion
+     putWord8 $ fromIntegral $ packMsgType msgHdrType
+     putWord8 $ fromIntegral msgHdrErrno
+     putWord8 $ fromIntegral $ packSAType msgHdrSatype
+     putWord16le $ fromIntegral $ msgHdrLength
+     putWord16le 0
+     putWord32le $ fromIntegral msgHdrSeq
+     putWord32le $ fromIntegral msgHdrPid
+   get = do
+     msgHdrVersion <- liftM fromIntegral getWord8
+     msgHdrType <- liftM (unpackMsgType . fromIntegral) getWord8
+     msgHdrErrno <- liftM fromIntegral getWord8
+     msgHdrSatype <- liftM (unpackSAType . fromIntegral) getWord8
+     msgHdrLength <- liftM fromIntegral getWord16le
+     _ <- liftM fromIntegral getWord16le
+     msgHdrSeq <- liftM fromIntegral getWord32le
+     msgHdrPid <- liftM fromIntegral getWord32le
+     return $ MsgHdr {..}
+
 instance Binary Msg where
    put msg@(Msg version typ errno satype length seq pid _  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ) = do
      putWord8 $ fromIntegral version
@@ -237,24 +277,25 @@ instance Binary Msg where
      putWord16le 0
      putWord32le $ fromIntegral seq
      putWord32le $ fromIntegral pid
-     
-     put $ msgSA msg >>= return . (\a -> SA_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeSA)) a)
-     put $ msgLifetimeCurrent msg >>= return . 
+     let putM a f = maybe (return ()) (put . f) a
+     putM (msgSA msg) (\a -> SA_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeSA)) a)
+     putM (msgLifetimeCurrent msg)
        (\a -> Lifetime_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeLifetimeCurrent)) a)
-     put $ msgLifetimeHard msg >>= return . 
+     putM (msgLifetimeHard msg)
        (\a -> Lifetime_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeLifetimeHard)) a)
-     put $ msgLifetimeSoft msg >>= return . 
+     putM (msgLifetimeSoft msg)
        (\a -> Lifetime_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeLifetimeSoft)) a)
-     put $ msgAddressSrc msg >>= return . 
+     putM (msgAddressSrc msg) 
        (\a -> Address_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeAddressSrc)) a)
-     put $ msgAddressDst msg >>= return . 
+     putM (msgAddressDst msg)
        (\a -> Address_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeAddressDst)) a)
-     put $ msgAddressProxy msg >>= return . 
+     putM (msgAddressProxy msg)
        (\a -> Address_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeAddressProxy)) a)
-     put $ msgKeyAuth msg >>= return . 
+     putM (msgKeyAuth msg)
        (\a -> Key_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeKeyAuth)) a)
-     put $ msgKeyEncrypt msg >>= return . 
+     putM (msgKeyEncrypt msg)
        (\a -> Key_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeKeyEncrypt)) a)
+       {-       
      put $ msgIdentitySrc msg
      put $ msgIdentityDst msg
      put $ msgSensitivity msg
@@ -273,7 +314,7 @@ instance Binary Msg where
        (\a -> Address_ (ExtHdr (sizeOf a) (fromIntegral $ packExtType ExtTypeNATTOA)) a)
      put $ msgSecCtx msg
      put $ msgKMAddress msg
-   
+    -}
    get = do
      version <- getWord8
      typ <- getWord8
@@ -321,104 +362,107 @@ instance Binary Msg where
      
 --     trace (show hdr) $ 
      if bodylen > 0 then do
-       buf <- getLazyByteString bodylen 
-       if (LBS.length buf /= bodylen) then return hdr
-         else do
+--       buf <- getLazyByteString bodylen 
+--       if (LBS.length buf /= bodylen) then return hdr
+--         else do
          repeateL (fromIntegral bodylen, hdr) updateMsgCnt
        else
        return hdr
      
 
 updateMsgCnt :: (Int, Msg) -> Get (Int, Msg)
-updateMsgCnt (left, msg) = do
+updateMsgCnt (0, msg) = return (0, msg)
+updateMsgCnt (left, msg) = trace ("left=" ++ show (left)) $ do
+
   hdr <- getLazyByteString 4
   let (extlen, exttype) = flip runGet hdr (do
-                                              len <- getWord16le 
+                                              len <- liftM ((*8) . fromIntegral) getWord16le 
                                               typ <- getWord16le
                                               return (len, typ))
---  let len = (fromIntegral extlen) `shift` 3 - 4
-  let left' = left - ((fromIntegral extlen) `shift` 3)
-  --trace ("len=" ++ show extlen ++ ", type=" ++ show (unpackExtType (fromIntegral exttype))) $ 
-  case unpackExtType (fromIntegral exttype) of
-    ExtTypeReserved -> do
-      ext <- get :: Get Ext
-      trace ("res" ++ show ext ) $ return (left', msg)
-    ExtTypeSA -> do
-      sa <- get :: Get SA_
-      return (left', msg { msgSA = Just $ sa_Cnt sa})
-    ExtTypeLifetimeCurrent -> do
-      lt <- get :: Get Lifetime_
-      return (left', msg { msgLifetimeCurrent = Just $ lifetime_Cnt lt })
-    ExtTypeLifetimeHard -> do
-      lt <- get :: Get Lifetime_
-      return (left', msg { msgLifetimeHard = Just $ lifetime_Cnt lt })
-    ExtTypeLifetimeSoft ->  do
-      lt <- get :: Get Lifetime_
-      return (left', msg { msgLifetimeSoft = Just $ lifetime_Cnt lt })
-    ExtTypeAddressSrc -> do
-      addr <- get :: Get Address_
-      return (left', msg { msgAddressSrc = Just $ address_Cnt addr })
-    ExtTypeAddressDst -> do
-      addr <- get :: Get Address_
-      return (left', msg { msgAddressDst = Just $ address_Cnt addr })
-    ExtTypeAddressProxy -> do
-      addr <- get :: Get Address_
-      return (left', msg { msgAddressProxy = Just $ address_Cnt addr })
-    ExtTypeKeyAuth -> do
-      key <- get :: Get Key_
-      return (left', msg { msgKeyAuth = Just $ key_Cnt key })
-    ExtTypeKeyEncrypt -> do
-      key <- get :: Get Key_
-      return (left', msg { msgKeyEncrypt = Just $ key_Cnt key })
-    ExtTypeIdentitySrc -> do
-      ident <- get :: Get Identity
-      return (left', msg { msgIdentitySrc = Just ident })
-    ExtTypeIdentityDst -> do
-      ident <- get :: Get Identity
-      return (left', msg { msgIdentityDst = Just ident })
-    ExtTypeSensitivity -> do
-      sens <- get :: Get Sensitivity
-      return (left', msg { msgSensitivity = Just sens })
-    ExtTypeProposal -> do
-      prop <- get :: Get Proposal
-      return (left', msg { msgProposal = Just prop })
-    ExtTypeSupportedAuth -> do
-      supp <- get :: Get Supported
-      return (left', msg { msgSupportedAuth = Just supp })
-    ExtTypeSupportedEncrypt -> do
-      supp <- get :: Get Supported
-      return (left', msg { msgSupportedEncrypt = Just supp })
-    ExtTypeSPIRange -> do
-      range <- get :: Get SPIRange
-      return (left', msg { msgSPIRange = Just range })
-    ExtTypeKMPrivate -> do
-      kmp <- get :: Get KMPrivate
-      return (left', msg { msgKMPrivate = Just kmp })
-    ExtTypePolicy -> do
-      policy <- get :: Get Policy_
-      return (left', msg { msgPolicy = Just $ policy_Cnt policy })
-    ExtTypeSA2 -> do
-      sa2 <- get :: Get SA2
-      return (left', msg { msgSA2 = Just sa2 })
-    ExtTypeNATTType -> do
-      typ <- get :: Get NATTType
-      return (left', msg { msgNATTType = Just typ })
-    ExtTypeNATTSPort -> do
-      port <- get :: Get NATTPort
-      return (left', msg { msgNATTSPort = Just port })
-    ExtTypeNATTDPort -> do
-      port <- get :: Get NATTPort
-      return (left', msg { msgNATTDPort = Just port })
-    ExtTypeNATTOA -> do
-      addr <- get :: Get Address_
-      return (left', msg { msgNATTOA = Just $ address_Cnt addr })
-    ExtTypeSecCtx -> do
-      ctx <- get :: Get SecCtx
-      return (left', msg { msgSecCtx = Just ctx })
-    ExtTypeKMAddress -> do
-      kmaddr <- get :: Get KMAddress
-      return (left', msg { msgKMAddress = Just kmaddr })
+  let left' = left - extlen
+  if (extlen < 4) then return (0, msg) else do
+    info <- liftM LBS.fromStrict $ getByteString (extlen - 4)
+    case unpackExtType (fromIntegral exttype) of
+      ExtTypeReserved -> do
+        let ext = runGet get (hdr <> info) :: Ext
+        trace ("res" ++ show ext ) $ return (left', msg)
+      ExtTypeSA -> do
+        let sa = runGet get (hdr <> info)
+        return (left', msg { msgSA = Just $ sa_Cnt sa})
+      ExtTypeLifetimeCurrent -> do
+        let lt = runGet get (hdr <> info)
+        return (left', msg { msgLifetimeCurrent = Just $ lifetime_Cnt lt })
+      ExtTypeLifetimeHard -> do
+        let lt = runGet get (hdr <> info)
+        return (left', msg { msgLifetimeHard = Just $ lifetime_Cnt lt })
+      ExtTypeLifetimeSoft ->  do
+        let lt = runGet get (hdr <> info)
+        return (left', msg { msgLifetimeSoft = Just $ lifetime_Cnt lt })
+      ExtTypeAddressSrc -> do
+        let addr = runGet get (hdr <> info)
+        return (left', msg { msgAddressSrc = Just $ address_Cnt addr })
+      ExtTypeAddressDst -> do
+        let addr = runGet get (hdr <> info)
+        return (left', msg { msgAddressDst = Just $ address_Cnt addr })
+      ExtTypeAddressProxy -> do
+        let addr = runGet get (hdr <> info)
+        return (left', msg { msgAddressProxy = Just $ address_Cnt addr })
+      ExtTypeKeyAuth -> do
+        let key = runGet get (hdr <> info)
+        return (left', msg { msgKeyAuth = Just $ key_Cnt key })
+      ExtTypeKeyEncrypt -> do
+        let key = runGet get (hdr <> info)
+        return (left', msg { msgKeyEncrypt = Just $ key_Cnt key })
+      ExtTypeIdentitySrc -> do
+        let ident = runGet get (hdr <> info)
+        return (left', msg { msgIdentitySrc = Just ident })
+      ExtTypeIdentityDst -> do
+        let ident = runGet get (hdr <> info)
+        return (left', msg { msgIdentityDst = Just ident })
+      ExtTypeSensitivity -> do
+        let sens = runGet get (hdr <> info)
+        return (left', msg { msgSensitivity = Just sens })
+      ExtTypeProposal -> do
+        let prop = runGet get (hdr <> info)
+        return (left', msg { msgProposal = Just prop })
+      ExtTypeSupportedAuth -> do
+        let supp = runGet get (hdr <> info)
+        return (left', msg { msgSupportedAuth = Just supp })
+      ExtTypeSupportedEncrypt -> do
+        let supp = runGet get (hdr <> info)
+        return (left', msg { msgSupportedEncrypt = Just supp })
+      ExtTypeSPIRange -> do
+        let range = runGet get (hdr <> info)
+        return (left', msg { msgSPIRange = Just range })
+      ExtTypeKMPrivate -> do
+        let kmp = runGet get (hdr <> info)
+        return (left', msg { msgKMPrivate = Just kmp })
+      ExtTypePolicy -> do
+        let policy = runGet get (hdr <> info)
+        return (left', msg { msgPolicy = Just $ policy_Cnt policy })
+      ExtTypeSA2 -> do
+        let sa2 = runGet get (hdr <> info)
+        return (left', msg { msgSA2 = Just sa2 })
+      ExtTypeNATTType -> do
+        let typ = runGet get (hdr <> info)
+        return (left', msg { msgNATTType = Just typ })
+      ExtTypeNATTSPort -> do
+        let port = runGet get (hdr <> info)
+        return (left', msg { msgNATTSPort = Just port })
+      ExtTypeNATTDPort -> do
+        let port = runGet get (hdr <> info)
+        return (left', msg { msgNATTDPort = Just port })
+      ExtTypeNATTOA -> do
+        let addr = runGet get (hdr <> info)
+        return (left', msg { msgNATTOA = Just $ address_Cnt addr })
+      ExtTypeSecCtx -> do
+        let ctx = runGet get (hdr <> info)
+        return (left', msg { msgSecCtx = Just ctx })
+      ExtTypeKMAddress -> do
+        let kmaddr = runGet get (hdr <> info)
+        return (left', msg { msgKMAddress = Just kmaddr })
 --    t -> error $ "type: " ++ show t
+    
 
 class Length a where
   lengthOf :: a -> Int
@@ -614,7 +658,7 @@ instance Binary Ext where
   get = do
     len <- getWord16le
     typ <- getWord16le
-    dat <- getLazyByteString $ fromIntegral $ (len `shift` 3 - #{size struct sadb_ext})
+    dat <- getLazyByteString $ fromIntegral $ (len `shift` 3)
     return $ Ext { extLen = fromIntegral len
                  , extType = fromIntegral typ
                  , extData = dat
@@ -690,8 +734,8 @@ instance Binary SA_ where
 
 data Lifetime = Lifetime { ltAllocations :: Int
                          , ltBytes :: Int
-                         , ltAddTime :: DateTime
-                         , ltUseTime :: DateTime
+                         , ltAddTime :: UTCTime
+                         , ltUseTime :: UTCTime
                          } deriving (Show, Eq)
                 
 instance Storable Lifetime where
@@ -707,8 +751,8 @@ instance Binary Lifetime_ where
     put hdr
     putWord32le $ fromIntegral allocations
     putWord64le $ fromIntegral bytes
-    putWord64le $ fromIntegral $ toSeconds addtime
-    putWord64le $ fromIntegral $ toSeconds usetime
+    putWord64le $ fromIntegral $ fromEnum $ utcTimeToPOSIXSeconds addtime
+    putWord64le $ fromIntegral $ fromEnum $ utcTimeToPOSIXSeconds usetime
   get = do
     hdr <- get
     allocations <- getWord32le
@@ -717,8 +761,8 @@ instance Binary Lifetime_ where
     usetime <- getWord64le
     return $ Lifetime_ hdr (Lifetime { ltAllocations = fromIntegral allocations
                                      , ltBytes = fromIntegral bytes
-                                     , ltAddTime = fromSeconds $ fromIntegral addtime
-                                     , ltUseTime = fromSeconds $ fromIntegral usetime
+                                     , ltAddTime = posixSecondsToUTCTime $ fromIntegral addtime
+                                     , ltUseTime = posixSecondsToUTCTime $ fromIntegral usetime
                                      })
 
 data Address = Address { addressProto :: Int

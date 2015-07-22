@@ -1,42 +1,47 @@
-{-# LANGUAGE DeriveDataTypeable, FlexibleContexts #-}
+{-# LANGUAGE DeriveDataTypeable    #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 module Main (main) where
 
-import Network.Security.PFKey
-import Network.Security.Message
-import System.Console.CmdArgs
-import Control.Monad
-import Data.DateTime
-import qualified Data.ByteString.Lazy as LBS
+import           Control.Monad
+import qualified Data.ByteString.Lazy     as LBS
+import           Network.Security.Message
+import           Network.Security.PFKey
+import           System.Console.CmdArgs
 --import qualified Data.ByteString.Char8 as BS
-import System.IO (stdin)
-import Data.Binary (encode, decode)
-import Control.Applicative
-import qualified Text.Parsec as P
-import qualified Text.Parsec.Prim as P
-import Network.Socket
-import Data.Bits
-import Data.Char
+import           Control.Applicative
+import           Data.Binary              (decode, encode)
+import           Data.Bits
+import           Data.Char
+import           Network.Socket
+import           System.IO                (stdin)
+import qualified Text.Parsec              as P
+import qualified Text.Parsec.Prim         as P
+import Data.Time.Clock
 
-data SetKey = SetKey { dump :: Bool
-                     , flush :: Bool
-                     , policy :: Bool
-                     , cmds :: Bool
-                     } deriving (Show, Data, Typeable)
+data SetKey =
+  SetKey
+  { dump   :: Bool
+  , flush  :: Bool
+  , policy :: Bool
+  , cmds   :: Bool
+  } deriving (Show, Data, Typeable)
 
-setkey = SetKey
-               {dump = def &= name "D"  &= help
-                       "Dump the SAD entries.  If -P is also specified, the SPD entries are dumped.  If -p is specified, the ports are displayed."
-               ,flush = def &= name "F" &= help
-                        "Flush the SAD entries.  If -P is also specified, the SPD entries are flushed."
-               ,policy = def &= name "P" &= help "Policy entries"
-               ,cmds = def &= name "c" &= help "read commands from stdin"
-               }
-              &=
-    verbosity &=
-    help "" &=
-    summary "F-IPSec-Tools v0.0.0, (C) Vladimir Sorokin 2011" &=
-    details ["",""
-            ,"",""]
+setkey =
+  SetKey
+  { dump = def &= name "D"  &= help
+           "Dump the SAD entries.  If -P is also specified, the SPD entries are dumped.  If -p is specified, the ports are displayed."
+  , flush = def &= name "F" &= help
+            "Flush the SAD entries.  If -P is also specified, the SPD entries are flushed."
+  ,policy = def &= name "P" &= help "Policy entries"
+  ,cmds = def &= name "c" &= help "read commands from stdin"
+  }
+  &=
+  verbosity &=
+  help "" &=
+  summary "F-IPSec-Tools v0.0.0, (C) Vladimir Sorokin 2011" &=
+  details ["",""
+          ,"",""]
 
 main :: IO ()
 main = do
@@ -101,7 +106,7 @@ main = do
             mapM_ (doCommand s) cmds
             pfkey_close s
 
-doCommand :: Socket -> Command -> IO ()
+doCommand :: PfSocket -> Command -> IO ()
 doCommand s CommandFlush = pfkey_send_flush s SATypeUnspec
 doCommand s CommandDump = do
         pfkey_send_dump s SATypeUnspec
@@ -171,16 +176,17 @@ data Token = Token { tknString :: String }
 separator = P.many1 (P.oneOf " \t\n")
 tokenize = P.many $ do
   P.optionMaybe separator
-  tkn <- P.choice [ P.char ';' >> return TokenEOC
-                  , P.char '#' >> P.many (P.noneOf "\n") >>= return . TokenComment
-                  , P.char '-' >> return (Token "-")
-                  , P.char '/' >> return TokenSlash
-                  , P.char '[' >> return TokenSqBrOpen
-                  , P.char ']' >> return TokenSqBrClose
-                  , P.char '.' >> return TokenDot
-                  , P.many1 P.digit >>= return . TokenNumber . (foldl (\a b -> a * 10 + digitToInt b) 0)
-                  , P.many1 (P.noneOf " \t\n;#-/[].") >>= return . Token
-                  ]
+  tkn <- P.choice
+         [ P.char ';' >> return TokenEOC
+         , P.char '#' >> P.many (P.noneOf "\n") >>= return . TokenComment
+         , P.char '-' >> return (Token "-")
+         , P.char '/' >> return TokenSlash
+         , P.char '[' >> return TokenSqBrOpen
+         , P.char ']' >> return TokenSqBrClose
+         , P.char '.' >> return TokenDot
+         , P.many1 P.digit >>= return . TokenNumber . (foldl (\a b -> a * 10 + digitToInt b) 0)
+         , P.many1 (P.noneOf " \t\n;#-/[].") >>= return . Token
+         ]
   P.optionMaybe separator
   return tkn
 
@@ -244,17 +250,18 @@ cmdSPDDump = token "spddump" >> return CommandSPDDump
 
 parser =
   P.many1 (do
-              cmd <- P.choice [ cmdFlush
-                              , cmdDump
-                              , cmdSPDFlush
-                              , cmdSPDDump
-                                --               , cmdAdd
-                                --                , cmdGet
-                                --                , cmdDelete
-                                --                , cmdDeleteAll
-                              , cmdSPDAdd
-                                --                , cmdSPDDelete
-                              ]
+              cmd <- P.choice
+                     [ cmdFlush
+                     , cmdDump
+                     , cmdSPDFlush
+                     , cmdSPDDump
+                       --               , cmdAdd
+                       --                , cmdGet
+                       --                , cmdDelete
+                       --                , cmdDeleteAll
+                     , cmdSPDAdd
+                       --                , cmdSPDDelete
+                     ]
               tokenEOC
               return cmd)
 
@@ -441,47 +448,55 @@ cmdSPDDelete = do
                             }
 -}
 
-data Command = CommandFlush
-             | CommandDump
-             | CommandSPDFlush
-             | CommandSPDDump
-             | CommandAdd { addSrc :: String
-                          , addDst :: String
-                          , addProto :: String
-                          , addSPI :: String
-                          , addEncAlg :: String
-                          , addEncKey :: String
-                          , addAuthAlg :: String
-                          , addAuthKey :: String
-                          , addCompAlg :: String
-                          }
-             | CommandGet { getSrc :: String
-                          , getDst :: String
-                          , getProto :: String
-                          , getSPI :: String
-                          }
-             | CommandDelete { deleteSrc :: String
-                             , deleteDst :: String
-                             , deleteProto :: String
-                             , deleteSPI :: String
-                             }
-             | CommandDeleteAll { deleteAllSrc :: String
-                                , deleteAllDst :: String
-                                , deleteAllProto :: String
-                                }
-             | CommandSPDAdd { spdAddSrcRange :: Address
-                             , spdAddDstRange :: Address
-                             , spdAddUpperspec :: IPProto
-                             , spdAddLabel :: Maybe String
-                             , spdAddPolicy :: Policy
-                             }
-             | CommandSPDAddTagged { spdAddTaggedTag :: String
-                                   , spdAddTaggedPolicy :: String
-                                   }
-             | CommandSPDDelete { spdDeleteSrcRange :: String
-                                , spdDeleteDstRange :: String
-                                , spdDeleteUppperspec :: String
-                                , spdDeleteDirection :: String
-                                }
-             deriving (Show)
+data Command
+  = CommandFlush
+  | CommandDump
+  | CommandSPDFlush
+  | CommandSPDDump
+  | CommandAdd
+    { addSrc     :: String
+    , addDst     :: String
+    , addProto   :: String
+    , addSPI     :: String
+    , addEncAlg  :: String
+    , addEncKey  :: String
+    , addAuthAlg :: String
+    , addAuthKey :: String
+    , addCompAlg :: String
+    }
+  | CommandGet
+    { getSrc   :: String
+    , getDst   :: String
+    , getProto :: String
+    , getSPI   :: String
+    }
+  | CommandDelete
+    { deleteSrc   :: String
+    , deleteDst   :: String
+    , deleteProto :: String
+    , deleteSPI   :: String
+    }
+  | CommandDeleteAll
+    { deleteAllSrc   :: String
+    , deleteAllDst   :: String
+    , deleteAllProto :: String
+    }
+  | CommandSPDAdd
+    { spdAddSrcRange  :: Address
+    , spdAddDstRange  :: Address
+    , spdAddUpperspec :: IPProto
+    , spdAddLabel     :: Maybe String
+    , spdAddPolicy    :: Policy
+    }
+  | CommandSPDAddTagged
+    { spdAddTaggedTag    :: String
+    , spdAddTaggedPolicy :: String
+    }
+  | CommandSPDDelete
+    { spdDeleteSrcRange   :: String
+    , spdDeleteDstRange   :: String
+    , spdDeleteUppperspec :: String
+    , spdDeleteDirection  :: String
+    }
+  deriving (Show)
 

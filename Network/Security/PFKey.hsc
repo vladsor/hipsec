@@ -1,12 +1,12 @@
 {-# LANGUAGE CPP, MultiParamTypeClasses #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE EmptyDataDecls #-}
+{-# LANGUAGE TypeFamilies #-}
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 
 module Network.Security.PFKey where
 
-import Network.Socket
-import qualified Network.Socket.ByteString.Lazy as BS
-import Network.Socket.Internal
-import Network.BSD
 import Network.Security.Message
 import Foreign.Storable ( Storable(..) )
 import Foreign.Ptr
@@ -18,51 +18,103 @@ import System.Posix.Process
 import Control.Monad
 import Data.Bits
 import Data.Maybe
-import Data.DateTime
 import Text.Printf
 import qualified Data.Time.Clock as Clock
-import Network.Socket.IOCtl
+-- import Network.Socket.IOCtl
 import System.Posix.IO.Select
 import System.Posix.IO.Select.FdSet
 import System.Posix.IO.Select.Types
 import Foreign.C.Types
 import System.Posix.Types
+import Data.Time.Clock
+import Data.Time.Clock.POSIX
+import Data.Time.Format
+
+import System.Socket hiding (getNameInfo)
+import System.Socket.Unsafe
 
 import Debug.Trace
+import Foreign
+import Foreign.C
+import Data.Monoid
+
+import Network.Socket (SockAddr(..), NameInfoFlag(..), aNY_PORT, getNameInfo)
+import Control.Concurrent.MVar
+foreign import ccall "ioctl" c_ioctl :: CInt -> CInt -> Ptr () -> IO CInt
+
+
 
 _PF_KEY_V2 = 2 :: Int
 
-pfkey_open :: IO Socket
+data Pseudo_AF_KEY
+instance Storable Pseudo_AF_KEY
+
+instance Family Pseudo_AF_KEY where
+  type SocketAddress Pseudo_AF_KEY = Pseudo_AF_KEY
+  familyNumber _ = #const PF_KEY
+
+data PfKeyV2
+
+instance Protocol PfKeyV2 where
+  protocolNumber = const 2
+
+data RecvBuffer = RecvBuffer CInt
+
+instance SetSocketOption RecvBuffer where
+  setSocketOption s (RecvBuffer sz) = unsafeSetSocketOption s (1) (#const SO_RCVBUF) sz
+
+data SendBuffer = SendBuffer CInt
+instance SetSocketOption SendBuffer where
+  setSocketOption s (SendBuffer sz) = unsafeSetSocketOption s (1) (#const SO_SNDBUF) sz
+
+type PfSocket = Socket Pseudo_AF_KEY Raw PfKeyV2
+
+pfkey_open :: IO PfSocket
 pfkey_open = do
-  s <- socket Pseudo_AF_KEY Raw (fromIntegral _PF_KEY_V2)
-  setSocketOption s RecvBuffer (1024 * 1024)
+  s <- socket :: IO PfSocket
+  setSocketOption s $ RecvBuffer (1024 * 1024)
+  setSocketOption s $ SendBuffer (128 * 1024)
+  putStrLn "pfkey_open"
   return s
 
-pfkey_close :: Socket -> IO ()
-pfkey_close = sClose
+pfkey_close :: PfSocket -> IO ()
+pfkey_close = close
 
-data FIONREAD = FIONREAD
+c_ioctl' :: Fd -> Ptr d -> IO ()
+c_ioctl' (Fd fd) p =
+    throwErrnoIfMinus1_ "ioctl" $
+            c_ioctl fd ((#const FIONREAD) :: CInt) (castPtr p)
 
-instance IOControl FIONREAD CInt where
-  ioctlReq _ = (#const FIONREAD) :: CInt
+ioctlsocket' :: Fd -- ^ The socket
+             -> IO CInt -- ^ The data
+ioctlsocket' fd = alloca $ \p -> c_ioctl' fd p >> peek p
 
-
-pfkey_recv :: Socket -> IO (Maybe Msg)
-pfkey_recv s = do
+pfkey_recv :: PfSocket -> IO (Maybe Msg)
+pfkey_recv s@(Socket mfd) = do
   let hdrlen = (sizeOf (undefined::Msg)) :: Int
-  ret <- select'' [Fd $ fdSocket s] [] [] (Time (CTimeval 10 0))
-  if (ret /= 1) then return Nothing else do
-  msglen <- (ioctlsocket' s FIONREAD) >>= return . fromIntegral
-  if (msglen < hdrlen) then return Nothing else do
-  buf <- BS.recv s (fromIntegral hdrlen)
-  let hdr = decode buf
-  let msglen = (msgLength hdr) `shift` 3
-  buf' <- BS.recv s $ fromIntegral $ msglen - hdrlen
-  if (LBS.length buf' /= fromIntegral (msglen - hdrlen)) then return Nothing else do
-  return $ Just $ decode $ buf `LBS.append` buf'
+  withMVar mfd $ \fd -> do
+    ret <- select'' [fd] [] [] (Time (CTimeval 10 0))
+    putStrLn $ "select:" ++ show ret
+--    if (ret /= 1) then return Nothing else do
+--    msglen <- (ioctlsocket' fd) >>= return . fromIntegral
+--    if (msglen < hdrlen) then return Nothing else do
+    return ()
+  buf <- receive s (fromIntegral hdrlen) (MessageFlags (#const MSG_PEEK))
+  putStrLn $ "receive:" ++ show (BS.length buf)
+  let hdr = decode (LBS.fromStrict buf)
+  let msglen = (msgHdrLength hdr) `shift` 3
+  putStrLn $ "receive:" ++ show hdr ++ ":" ++ show msglen
+  buf' <- if msglen > 0 then receive s (fromIntegral msglen) mempty else return mempty
+  putStrLn $ "receive:" ++ show (BS.length buf')
+  if (BS.length buf' /= msglen) then return Nothing else do
+  return $ Just $ decode $ LBS.fromStrict $ buf'
     
-pfkey_send :: Socket -> Msg -> IO ()
-pfkey_send s msg = BS.send s (encode msg) >> return ()
+pfkey_send :: PfSocket -> Msg -> IO ()
+pfkey_send s msg = do
+  putStrLn $ "pfkey_send before: " ++ show msg ++ ":" ++ show (LBS.length (encode msg))
+  send s (LBS.toStrict (encode msg)) mempty
+  putStrLn "pfkey_send after"
+  return ()
   
 mkMsg :: MsgType -> SAType -> Int -> Int -> Msg 
 mkMsg typ satyp seq pid = defaultMsg { msgType = typ
@@ -82,7 +134,7 @@ mkAddress exttype addr prefixlen proto = Address { addressLen = (sizeOf (undefin
 
 -}
 
-pfkey_send_x3 :: Socket -> MsgType -> SAType -> IO ()
+pfkey_send_x3 :: PfSocket -> MsgType -> SAType -> IO ()
 pfkey_send_x3 s typ satyp = case typ of
   MsgTypePromisc | satyp /= SATypeUnspec && satyp /= SATypeUnspec1 -> return ()
   MsgTypePromisc -> send'
@@ -98,7 +150,7 @@ pfkey_send_x3 s typ satyp = case typ of
           pfkey_send s msg
     
 
-pfkey_send_x4 :: Socket -> MsgType -> SockAddr -> Int -> SockAddr -> Int -> Int -> DateTime -> DateTime -> Policy -> Int -> IO ()
+pfkey_send_x4 :: PfSocket -> MsgType -> SockAddr -> Int -> SockAddr -> Int -> Int -> UTCTime -> UTCTime -> Policy -> Int -> IO ()
 pfkey_send_x4 s typ src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto ltime vtime policy seq = do
   pid <- liftM fromIntegral $ getProcessID
   let msg = (mkMsg typ SATypeUnspec 0 pid) 
@@ -111,25 +163,25 @@ pfkey_send_x4 s typ src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd pr
   return ()
 pfkey_send_x4 _ _ _ _ _ _ _ _ _ _ _ = error "unsupported parameters"
 
-pfkey_send_flush :: Socket -> SAType -> IO ()
+pfkey_send_flush :: PfSocket -> SAType -> IO ()
 pfkey_send_flush s satyp = pfkey_send_x3 s MsgTypeFlush satyp
 
-pfkey_send_dump :: Socket -> SAType -> IO ()
+pfkey_send_dump :: PfSocket -> SAType -> IO ()
 pfkey_send_dump s satyp = pfkey_send_x3 s MsgTypeDump satyp
 
-pfkey_send_promisc :: Socket -> Bool -> IO ()
+pfkey_send_promisc :: PfSocket -> Bool -> IO ()
 pfkey_send_promisc s b = pfkey_send_x3 s MsgTypePromisc 
                          (if b then SATypeUnspec1 else SATypeUnspec)
 
-pfkey_send_spdadd :: Socket -> SockAddr -> Int -> SockAddr -> Int -> Int -> Policy -> Int -> IO ()
+pfkey_send_spdadd :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> Int -> Policy -> Int -> IO ()
 pfkey_send_spdadd s src prefs dst prefd proto policy seq = 
-  pfkey_send_x4 s MsgTypeSPDAdd src prefs dst prefd proto startOfTime startOfTime policy seq
+  pfkey_send_x4 s MsgTypeSPDAdd src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
 
-pfkey_send_spdflush :: Socket -> IO ()
+pfkey_send_spdflush :: PfSocket -> IO ()
 pfkey_send_spdflush s = pfkey_send_x3 s MsgTypeSPDFlush SATypeUnspec
 
-pfkey_send_spddump :: Socket -> IO ()
+pfkey_send_spddump :: PfSocket -> IO ()
 pfkey_send_spddump s = pfkey_send_x3 s MsgTypeSPDDump SATypeUnspec
 
 
@@ -156,7 +208,7 @@ pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport =
     _ -> ""
   ++ " "
   
-pfkey_sa_dump :: Msg -> DateTime -> String
+pfkey_sa_dump :: Msg -> UTCTime -> String
 pfkey_sa_dump msg ct =
   let sa = msgSA msg
       sa2 = msgSA2 msg
@@ -227,7 +279,7 @@ pfkey_sa_dump_long msg ct sa' sa2' =
           let off = Clock.diffUTCTime ct (ltAddTime tm) in
           "\tcreated: " ++ strTime (ltAddTime tm) ++ 
           "\tcurrent:" ++ (show ct) ++ "\n" ++
-          "\tdiff:" ++ (if toSeconds (ltAddTime tm) == 0 then "0" else
+          "\tdiff:" ++ (if utcTimeToPOSIXSeconds (ltAddTime tm) == 0 then "0" else
                           show off) ++ "(s)"
           ++ "\thard: " ++ fromMaybe "0" (fmap (show . ltAddTime) lfth) ++ "(s)"
           ++ "\tsoft: " ++ fromMaybe "0" (fmap (show . ltAddTime) lfts) ++ "(s)\n"
@@ -290,8 +342,8 @@ pfkey_spd_dump msg = do
           Just tm -> "\tcreated: " ++ strTime (ltAddTime tm) ++ " lastused: " ++ strTime (ltUseTime tm) ++ "\n" 
         putStr $ case lfth of
           Nothing -> ""
-          Just tm -> "\tlifetime: " ++ show (toSeconds . ltAddTime $ tm) ++ 
-                     "(s) validtime: " ++ show (toSeconds . ltUseTime $ tm) ++ "(s)\n" 
+          Just tm -> "\tlifetime: " ++ show (utcTimeToPOSIXSeconds . ltAddTime $ tm) ++ 
+                     "(s) validtime: " ++ show (utcTimeToPOSIXSeconds . ltUseTime $ tm) ++ "(s)\n" 
         putStr $ case secctx of
           Nothing -> ""
           Just (SecCtx alg doi len ) -> "\tsecurity context doi: " ++ show doi ++ "\n" ++
@@ -300,8 +352,8 @@ pfkey_spd_dump msg = do
                                         "\tsecurity context: %s\n"
         putStrLn $ "\tspid=" ++ show (policyId policy') ++ " seq=" ++ show seq ++ " pid=" ++ show pid
 
-strTime :: DateTime -> String
-strTime time = if (toSeconds time == 0) then ""
+strTime :: UTCTime -> String
+strTime time = if (utcTimeToPOSIXSeconds time == 0) then ""
                else show time
 
 strLifetimeByte :: Maybe Lifetime -> String -> String
