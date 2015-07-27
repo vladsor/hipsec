@@ -8,7 +8,7 @@
 module Network.Security.PFKey where
 
 import Network.Security.Message
-import Foreign.Storable ( Storable(..) )
+-- import Foreign.Storable ( Storable(..) )
 import Foreign.Ptr
 import Foreign.Marshal.Alloc
 import qualified Data.ByteString as BS
@@ -34,9 +34,10 @@ import System.Socket hiding (getNameInfo)
 import System.Socket.Unsafe
 
 import Debug.Trace
-import Foreign
+import Foreign hiding (sizeOf)
 import Foreign.C
 import Data.Monoid
+import Data.Hex
 
 import Network.Socket (SockAddr(..), NameInfoFlag(..), aNY_PORT, getNameInfo)
 import Control.Concurrent.MVar
@@ -112,6 +113,7 @@ pfkey_recv s@(Socket mfd) = do
 pfkey_send :: PfSocket -> Msg -> IO ()
 pfkey_send s msg = do
   putStrLn $ "pfkey_send before: " ++ show msg ++ ":" ++ show (LBS.length (encode msg))
+  LBS.putStrLn $ hex (encode msg)
   send s (LBS.toStrict (encode msg)) mempty
   putStrLn "pfkey_send after"
   return ()
@@ -148,7 +150,6 @@ pfkey_send_x3 s typ satyp = case typ of
           pid <- liftM fromIntegral $ getProcessID
           let msg = mkMsg typ satyp 0 pid
           pfkey_send s msg
-    
 
 pfkey_send_x4 :: PfSocket -> MsgType -> SockAddr -> Int -> SockAddr -> Int -> Int -> UTCTime -> UTCTime -> Policy -> Int -> IO ()
 pfkey_send_x4 s typ src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto ltime vtime policy seq = do
@@ -174,9 +175,32 @@ pfkey_send_promisc s b = pfkey_send_x3 s MsgTypePromisc
                          (if b then SATypeUnspec1 else SATypeUnspec)
 
 pfkey_send_spdadd :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> Int -> Policy -> Int -> IO ()
-pfkey_send_spdadd s src prefs dst prefd proto policy seq = 
+pfkey_send_spdadd s src prefs dst prefd proto policy seq =
   pfkey_send_x4 s MsgTypeSPDAdd src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
+pfkey_send_spdadd' :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> Int -> Policy -> Int -> IO ()
+pfkey_send_spdadd' s src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto policy seq = do
+  pid <- liftM fromIntegral $ getProcessID
+  let msg = (mkMsg MsgTypeSPDAdd SATypeUnspec 0 pid)
+        { msgAddressSrc = Just $ Address { addressProto = proto, addressPrefixLen = prefs, addressAddr = src }
+        , msgAddressDst = Just $ Address { addressProto = proto, addressPrefixLen = prefd, addressAddr = dst }
+        , msgPolicy = Just policy
+        }
+  pfkey_send s msg
+  return ()
+
+
+pfkey_send_register :: PfSocket -> SAType -> IO ()
+pfkey_send_register s satyp =
+  pfkey_send_x3 s MsgTypeRegister satyp
+
+pfkey_recv_register :: PfSocket -> IO ()
+pfkey_recv_register s = do
+  msg <- pfkey_recv s
+  case msg of
+    Nothing -> return ()
+    msg' -> print msg
+  return ()
 
 pfkey_send_spdflush :: PfSocket -> IO ()
 pfkey_send_spdflush s = pfkey_send_x3 s MsgTypeSPDFlush SATypeUnspec
@@ -217,7 +241,7 @@ pfkey_sa_dump msg ct =
       natt_type = msgNATTType msg
       natt_sport = msgNATTSPort msg
       natt_dport = msgNATTDPort msg
-      use_natt = case natt_type of 
+      use_natt = case natt_type of
         Nothing -> False
         Just typ -> natttypeType typ /= 0
   in      
@@ -256,7 +280,7 @@ pfkey_sa_dump_long msg ct sa' sa2' =
      (True, SATypeESP) -> "esp-udp"
      (True, _) -> "natt+"
      _ -> ""
-  ++  show satyp ++ show (sa2Mode sa2') ++ 
+  ++  show satyp ++ " mode=" ++ show (sa2Mode sa2') ++ " " ++
   printf "spi=%u(0x%08x) reqid=%u(0x%08x)\n" (saSPI sa') (saSPI sa') (sa2ReqId sa2') (sa2ReqId sa2') 
   ++ case (use_natt, natt_oa) of
     (True, Just oa) -> "\tNAT OA=" ++ show oa ++ "\n"

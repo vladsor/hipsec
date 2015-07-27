@@ -103,6 +103,8 @@ main = do
           Right cmds -> do
             print cmds
             s <- pfkey_open
+            pfkey_send_register s SATypeUnspec
+            pfkey_recv_register s
             mapM_ (doCommand s) cmds
             pfkey_close s
 
@@ -149,7 +151,7 @@ doCommand s (CommandAdd src dst proto spi encAlg encKey authAlg authKey compAlg)
                                 }
 -}
 doCommand s (CommandSPDAdd (Address sproto prefs src) (Address droto prefd dst) upper label policy) = do
-  pfkey_send_spdadd s src prefs dst prefd (fromIntegral $ packIPProto upper) policy 0
+  pfkey_send_spdadd' s src prefs dst prefd (fromIntegral $ packIPProto upper) policy 0
 
 {-
              | CommandSPDAddTagged { spdAddTaggedTag :: String
@@ -365,7 +367,9 @@ tokenPolicy = do
   str <- tokenString
 --  pol <- P.choice $ fmap token ["discard", "none", "ipsec"]
   let pol = (read str) :: IPSecPolicy
-  proto <- P.choice $ fmap token ["ah", "esp", "ipcomp"]
+--  proto <- P.choice $ fmap token ["ah", "esp", "ipcomp"]
+  str <- tokenString
+  let proto = (read str) :: IPProto
   tokenSlash
 --  mode <- P.choice $ fmap token ["tunnel", "transport"]
   str <- tokenString
@@ -382,7 +386,7 @@ tokenPolicy = do
 --  level <- P.choice $ fmap token ["default", "use", "require", "unique"]
   let level = (read str) :: IPSecLevel
 
-  let req = IPSecRequest { ipsecreqProto = 0
+  let req = IPSecRequest { ipsecreqProto = proto
                          , ipsecreqMode = mode
                          , ipsecreqLevel = level
                          , ipsecreqReqId = 0

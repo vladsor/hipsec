@@ -14,12 +14,12 @@ bug-reports:    http://trac.haskell.org/network/
 library
     exposed-modules: Network.Security.Message, Network.Security.PFKey
     build-depends: base >= 4.0.0.0, unix, binary >= 0.5.0.0, 
-                   bytestring, socket, network, time, mtl, ioctl, select
+                   bytestring, socket, network, time, mtl, ioctl, select, hex
 
 
 Executable setkey
     build-depends: base >= 4.0.0.0, unix, binary >= 0.5.0.0, 
-                   bytestring, socket, network, hipsec, time, cmdargs, parsec, ioctl, select
+                   bytestring, socket, network, hipsec, time, cmdargs, parsec, ioctl, select, hex
 
     main-is: src/setkey.hs
     buildable: True
