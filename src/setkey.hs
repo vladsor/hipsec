@@ -1,14 +1,16 @@
 {-# LANGUAGE DeriveDataTypeable    #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE RecordWildCards #-}
 module Main (main) where
 
 import           Control.Monad
+import qualified Data.ByteString     as BS
+import qualified Data.ByteString.Char8     as BSC
 import qualified Data.ByteString.Lazy     as LBS
 import           Network.Security.Message
 import           Network.Security.PFKey
 import           System.Console.CmdArgs
---import qualified Data.ByteString.Char8 as BS
 import           Control.Applicative
 import           Data.Binary              (decode, encode)
 import           Data.Bits
@@ -84,7 +86,6 @@ main = do
       when (flush opts) $ do
         putStrLn "SAD Flush"
         s <- pfkey_open
---        pfkey_send_flush s SATypeUnspec
         doCommand s CommandFlush
         pfkey_close s
 
@@ -132,41 +133,21 @@ doCommand s CommandSPDDump = do
               print $ "Message" ++ show msg ++ "\n"
               pfkey_spd_dump msg
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
-{-
-doCommand s (CommandAdd src dst proto spi encAlg encKey authAlg authKey compAlg) = undefined
-                          }
-             | CommandGet { getSrc :: String
-                          , getDst :: String
-                          , getProto :: String
-                          , getSPI :: String
-                          }
-             | CommandDelete { deleteSrc :: String
-                             , deleteDst :: String
-                             , deleteProto :: String
-                             , deleteSPI :: String
-                             }
-             | CommandDeleteAll { deleteAllSrc :: String
-                                , deleteAllDst :: String
-                                , deleteAllProto :: String
-                                }
--}
-doCommand s (CommandSPDAdd (Address sproto prefs src) (Address droto prefd dst) upper label policy) = do
+doCommand s (CommandAdd src dst proto spi encAlg encKey authAlg authKey compAlg) = do
+  pfkey_send_add s proto IPSecModeAny src dst spi 0 0 authAlg authKey encAlg encKey 0 Nothing Nothing 0
+doCommand s (CommandGet src dst proto spi) = undefined
+doCommand s (CommandDelete src dst proto spi) = undefined
+doCommand s (CommandDeleteAll src dst proto) = undefined
+doCommand s (CommandSPDAdd (Address _ prefs src) (Address _ prefd dst) upper label policy) = do
   pfkey_send_spdadd' s src prefs dst prefd (fromIntegral $ packIPProto upper) policy 0
-
-{-
-             | CommandSPDAddTagged { spdAddTaggedTag :: String
-                                   , spdAddTaggedPolicy :: String
-                                   }
-             | CommandSPDDelete { spdDeleteSrcRange :: String
-                                , spdDeleteDstRange :: String
-                                , spdDeleteUppperspec :: String
-                                , spdDeleteDirection :: String
-                                }
--}
-doCommand _ _ = error "doCommand error"
+doCommand s (CommandSPDAddTagged tag policy) = undefined
+doCommand s (CommandSPDDelete src dst upper dir) = undefined
+--doCommand _ _ = error "doCommand error"
 
 data Token = Token { tknString :: String }
            | TokenNumber { tknNumber :: Int }
+           | TokenHexString { tknHexString :: String }
+           | TokenQuotedString { tknQuotedString :: String }
            | TokenEOC
            | TokenSlash
            | TokenSqBrOpen
@@ -186,8 +167,11 @@ tokenize = P.many $ do
          , P.char '[' >> return TokenSqBrOpen
          , P.char ']' >> return TokenSqBrClose
          , P.char '.' >> return TokenDot
+         , P.between (P.char '"') (P.char '"') (liftM TokenQuotedString $ P.many (P.noneOf "\""))
+         , P.char '0' >> ((P.oneOf "xX" >> (liftM TokenHexString $ P.many1 P.hexDigit)) <|>
+                         (P.many1 P.digit >>= return . TokenNumber . (foldl (\a b -> a * 10 + digitToInt b) 0)))
          , P.many1 P.digit >>= return . TokenNumber . (foldl (\a b -> a * 10 + digitToInt b) 0)
-         , P.many1 (P.noneOf " \t\n;#-/[].") >>= return . Token
+         , P.many1 (P.noneOf " \t\n;#/[].\"") >>= return . Token
          ]
   P.optionMaybe separator
   return tkn
@@ -205,8 +189,20 @@ tokenString = (satisfy f) >>= return . tknString
     f (Token _) = True
     f _ = False
 
+tokenQuotedString :: P.Stream s m Token => P.ParsecT s u m String
+tokenQuotedString = (satisfy f) >>= return . tknQuotedString
+  where
+    f (TokenQuotedString _) = True
+    f _ = False
+
+tokenHexString :: P.Stream s m Token => P.ParsecT s u m String
+tokenHexString = (satisfy f) >>= return . tknHexString
+  where
+    f (TokenHexString _) = True
+    f _ = False
+
 tokenNumber :: P.Stream s m Token => P.ParsecT s u m Int
-tokenNumber = (satisfy f) >>= return . tknNumber
+tokenNumber = liftM tknNumber (satisfy f) <|> liftM (foldl (\a b -> a * 16 + digitToInt b) 0) tokenHexString
   where
     f (TokenNumber _) = True
     f _ = False
@@ -238,6 +234,9 @@ tokenDot = (satisfy f) >> return ()
     f TokenDot = True
     f _ = False
 
+tokenKey :: P.Stream s m Token => P.ParsecT s u m Key
+tokenKey = liftM (\b -> Key (8 * BS.length b) b) $ (liftM BSC.pack tokenQuotedString) <|> (liftM (BS.pack . fmap (fromIntegral . digitToInt)) tokenHexString)
+
 cmdFlush :: P.Stream s m Token => P.ParsecT s u m Command
 cmdFlush = token "flush" >> return CommandFlush
 
@@ -257,96 +256,58 @@ parser =
                      , cmdDump
                      , cmdSPDFlush
                      , cmdSPDDump
-                       --               , cmdAdd
-                       --                , cmdGet
-                       --                , cmdDelete
-                       --                , cmdDeleteAll
+                     , cmdAdd
+                     , cmdGet
+                     , cmdDelete
+                     , cmdDeleteAll
                      , cmdSPDAdd
-                       --                , cmdSPDDelete
+                     , cmdSPDDelete
                      ]
               tokenEOC
               return cmd)
 
-{-
 
-key = undefined
 cmdAdd = do
-  src <- many $ noneOf " \t\n"
-  many1 separator
-  dst <- string
-  many1 separator
-  spi <- string
-  many1 separator
-  string "-E"
-  many1 separator
-  enc <- string
-  many1 separator
-  encKey <- key
-  many1 separator
-  string "-A"
-  many1 separator
-  auth <- string
-  many1 separator
-  authKey <- key
+  token "add"
+  addSrc <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  addDst <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  addProto <- liftM read tokenString
+  addSPI <- tokenNumber
+  token "-"
+  token "E"
+  addEncAlg <- liftM read tokenString
+  addEncKey <- tokenKey
+  token "-"
+  token "A"
+  addAuthAlg <- liftM read tokenString
+  addAuthKey <- tokenKey
+  let addCompAlg = CompAlgNone
 
-  return $ CommandAdd { addSrc = src
-                      , addDst = dst
-                      , addProto = proto
-                      , addSPI = spi
-                      , addEncAlg = encAlg
-                      , addEncKey = encKey
-                      , addAuthAlg = authAlg
-                      , addAuthKey = authKey
-                      }
+  return CommandAdd{..}
+
 cmdGet = do
-  src <- string
-  dst <- string
-  proto <- string
-  spi <- string
-  return $ CommandGet { getSrc = src
-                      , getDst = dst
-                      , getProto = proto
-                      , getSPI = spi
-                      }
+  token "get"
+  getSrc <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  getDst <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  getProto <- liftM read tokenString
+  getSPI <- liftM read tokenString
+  return CommandGet{..}
 
 cmdDelete = do
-  return $ CommandDelete { deleteSrc = src
-                         , deleteDst = dst
-                         , deleteProto = proto
-                         , deleteSPI = spi
-                         }
+  token "delete"
+  deleteSrc <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  deleteDst <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  deleteProto <- liftM read tokenString
+  deleteSPI <- liftM read tokenString
+  return CommandDelete{..}
 
 cmdDeleteAll = do
-  return $ CommandDeleteAll { deleteAllSrc = src
-                            , deleteAllDst = dst
-                            , deleteAllProto = proto
-                            }
--}
+  token "deleteall"
+  deleteAllSrc <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  deleteAllDst <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  deleteAllProto <- liftM read tokenString
+  return CommandDeleteAll{..}
 
-split :: Char -> String -> [String]
-split c s =
-  let
-    split' acc "" "" = acc
-    split' acc ps "" = acc ++ [ps]
-    split' acc ps (f:s') =
-      if f == c then
-        split' (acc ++ [ps]) "" s'
-      else
-        split' acc (ps ++ [f]) s'
-  in split' [] "" s
-
-{-
-trHostAddress :: String -> Maybe HostAddress
-trHostAddress s =
-  let
-    p = split '.' s
-    n :: [Int]
-    n = reverse $ fmap read p
-    a = foldl (\s a -> shift s 8 .|. a) 0 n
-  in
-   if length p /= 4 then Nothing
-   else Just (fromIntegral a)
--}
 tokenIP :: P.Stream s m Token => P.ParsecT s u m HostAddress
 tokenIP = do
   v1 <- tokenNumber
@@ -360,44 +321,26 @@ tokenIP = do
 
 tokenPolicy :: P.Stream s m Token => P.ParsecT s u m Policy
 tokenPolicy = do
-  str <- tokenString
-  let dir = (read str) :: IPSecDir
---  direction <- P.choice $ fmap token ["out", "in", "fwd"]
---  prio
-  str <- tokenString
---  pol <- P.choice $ fmap token ["discard", "none", "ipsec"]
-  let pol = (read str) :: IPSecPolicy
---  proto <- P.choice $ fmap token ["ah", "esp", "ipcomp"]
-  str <- tokenString
-  let proto = (read str) :: IPProto
+  policyDir <- liftM read tokenString
+  policyType <- liftM read tokenString
+  ipsecreqProto <- liftM read tokenString
   tokenSlash
---  mode <- P.choice $ fmap token ["tunnel", "transport"]
-  str <- tokenString
-  let mode = (read str) :: IPSecMode
+  ipsecreqMode <- liftM read tokenString
   tokenSlash
-  addrs <- P.optionMaybe $ do
+  ipsecreqAddrs <- P.optionMaybe $ do
     src <- tokenIP
     token "-"
     dst <- tokenIP
     return (SockAddrInet 0 src, SockAddrInet 0 dst)
   tokenSlash
 
-  str <- tokenString
---  level <- P.choice $ fmap token ["default", "use", "require", "unique"]
-  let level = (read str) :: IPSecLevel
+  ipsecreqLevel <- liftM read tokenString
 
-  let req = IPSecRequest { ipsecreqProto = proto
-                         , ipsecreqMode = mode
-                         , ipsecreqLevel = level
-                         , ipsecreqReqId = 0
-                         , ipsecreqAddrs = addrs
-                         }
-  return $ Policy { policyType = pol
-                  , policyDir = dir
-                  , policyId = 0
-                  , policyPriority = 0
-                  , policyIPSecRequests = [req]
-                  }
+  let policyId = 0
+  let policyPriority = 0
+  let ipsecreqReqId = 0
+  let policyIPSecRequests = return IPSecRequest{..}
+  return Policy{..}
 
 tokenAddressRange :: P.Stream s m Token => P.ParsecT s u m Address
 tokenAddressRange = do
@@ -428,29 +371,23 @@ tokenAddressRange = do
 cmdSPDAdd :: P.Stream s m Token => P.ParsecT s u m Command
 cmdSPDAdd = do
   token "spdadd"
-  src <- tokenAddressRange
-  dst <- tokenAddressRange
-  str <- tokenString
-  let upper = (read str) :: IPProto
+  spdAddSrcRange <- tokenAddressRange
+  spdAddDstRange <- tokenAddressRange
+  spdAddUpperSpec <- liftM read tokenString
   token "-"
   token "P"
-  pol <- tokenPolicy
-  return $ CommandSPDAdd { spdAddSrcRange = src
-                         , spdAddDstRange = dst
-                         , spdAddUpperspec = upper
-                         , spdAddLabel = Nothing
-                         , spdAddPolicy = pol
-                         }
+  let spdAddLabel = Nothing
+  spdAddPolicy <- tokenPolicy
+  return CommandSPDAdd{..}
 
-{-
 cmdSPDDelete :: P.Stream s m Token => P.ParsecT s u m Command
 cmdSPDDelete = do
-  return $ CommandSPDDelete { spdDeleteSrcRange = srcRange
-                            , spdDeleteDstRange = dstRange
-                            , spdDeleteUppperspec = upperSpec
-                            , spdDeleteDirection = direction
-                            }
--}
+  token "spddelete"
+  spdDeleteSrcRange <- tokenAddressRange
+  spdDeleteDstRange <- tokenAddressRange
+  spdDeleteUppperspec <- liftM read tokenString
+  spdDeleteDirection <- liftM read tokenString
+  return CommandSPDDelete{..}
 
 data Command
   = CommandFlush
@@ -458,37 +395,37 @@ data Command
   | CommandSPDFlush
   | CommandSPDDump
   | CommandAdd
-    { addSrc     :: String
-    , addDst     :: String
-    , addProto   :: String
-    , addSPI     :: String
-    , addEncAlg  :: String
-    , addEncKey  :: String
-    , addAuthAlg :: String
-    , addAuthKey :: String
-    , addCompAlg :: String
+    { addSrc     :: Address
+    , addDst     :: Address
+    , addProto   :: SAType
+    , addSPI     :: Int
+    , addEncAlg  :: EncAlg
+    , addEncKey  :: Key
+    , addAuthAlg :: AuthAlg
+    , addAuthKey :: Key
+    , addCompAlg :: CompAlg
     }
   | CommandGet
-    { getSrc   :: String
-    , getDst   :: String
-    , getProto :: String
-    , getSPI   :: String
+    { getSrc   :: Address
+    , getDst   :: Address
+    , getProto :: SAType
+    , getSPI   :: Int
     }
   | CommandDelete
-    { deleteSrc   :: String
-    , deleteDst   :: String
-    , deleteProto :: String
-    , deleteSPI   :: String
+    { deleteSrc   :: Address
+    , deleteDst   :: Address
+    , deleteProto :: SAType
+    , deleteSPI   :: Int
     }
   | CommandDeleteAll
-    { deleteAllSrc   :: String
-    , deleteAllDst   :: String
-    , deleteAllProto :: String
+    { deleteAllSrc   :: Address
+    , deleteAllDst   :: Address
+    , deleteAllProto :: SAType
     }
   | CommandSPDAdd
     { spdAddSrcRange  :: Address
     , spdAddDstRange  :: Address
-    , spdAddUpperspec :: IPProto
+    , spdAddUpperSpec :: IPProto
     , spdAddLabel     :: Maybe String
     , spdAddPolicy    :: Policy
     }
@@ -497,10 +434,10 @@ data Command
     , spdAddTaggedPolicy :: String
     }
   | CommandSPDDelete
-    { spdDeleteSrcRange   :: String
-    , spdDeleteDstRange   :: String
-    , spdDeleteUppperspec :: String
-    , spdDeleteDirection  :: String
+    { spdDeleteSrcRange   :: Address
+    , spdDeleteDstRange   :: Address
+    , spdDeleteUppperspec :: IPProto
+    , spdDeleteDirection  :: IPSecDir
     }
-  deriving (Show)
+  deriving (Eq, Show)
 
