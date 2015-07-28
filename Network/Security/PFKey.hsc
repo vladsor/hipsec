@@ -125,16 +125,17 @@ mkMsg typ satyp seq pid = defaultMsg { msgType = typ
                                      , msgSeq = seq
                                      , msgPid = pid
 				     }
-                                     
-{-
-mkAddress :: ExtType -> SockAddr -> Int -> Int -> Address
-mkAddress exttype addr prefixlen proto = Address { addressLen = (sizeOf (undefined :: Address) + sizeOfSockAddr addr) `shiftR` 3
-                                                 , addressExtType = exttype
-                                                 , addressProto = proto
-                                                 , addressPrefixLen = prefixlen
-                                                 }
 
--}
+pfkey_send_x2 :: PfSocket -> MsgType -> SAType -> Address -> Address -> Int -> IO ()
+pfkey_send_x2 s typ satype src dst spi = do
+  pid <- liftM fromIntegral getProcessID
+  let msg = (mkMsg typ satype 0 pid)
+        { msgAddressSrc = Just src
+        , msgAddressDst = Just dst
+        , msgSA = Just $ SA { saSPI = spi, saReplay = 0, saState = SAStateLarval, saAuth = AuthAlgNone, saEncrypt = EncAlgNone, saFlags = 0 }
+        }
+  pfkey_send s msg
+  return ()
 
 pfkey_send_x3 :: PfSocket -> MsgType -> SAType -> IO ()
 pfkey_send_x3 s typ satyp = case typ of
@@ -153,10 +154,10 @@ pfkey_send_x3 s typ satyp = case typ of
 
 pfkey_send_x4 :: PfSocket -> MsgType -> SockAddr -> Int -> SockAddr -> Int -> Int -> UTCTime -> UTCTime -> Policy -> Int -> IO ()
 pfkey_send_x4 s typ src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto ltime vtime policy seq = do
-  pid <- liftM fromIntegral $ getProcessID
+  pid <- liftM fromIntegral getProcessID
   let msg = (mkMsg typ SATypeUnspec 0 pid) 
         { msgAddressSrc = Just $ Address { addressProto = proto, addressPrefixLen = prefs, addressAddr = src }
-        , msgAddressDst = Just $ Address { addressProto = proto, addressPrefixLen = prefd, addressAddr = dst } 
+        , msgAddressDst = Just $ Address { addressProto = proto, addressPrefixLen = prefd, addressAddr = dst }
         , msgLifetimeHard = Just $ Lifetime { ltAllocations = 0, ltBytes = 0, ltAddTime = ltime, ltUseTime = vtime }
         , msgPolicy = Just policy
         }
@@ -178,36 +179,66 @@ pfkey_send_spdadd :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> Int -> Po
 pfkey_send_spdadd s src prefs dst prefd proto policy seq =
   pfkey_send_x4 s MsgTypeSPDAdd src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
-pfkey_send_spdadd' :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> Int -> Policy -> Int -> IO ()
+pfkey_send_spddelete :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
+pfkey_send_spddelete s src prefs dst prefd proto policy seq =
+  pfkey_send_x4 s MsgTypeSPDDelete src prefs dst prefd (fromIntegral $ packIPProto proto) (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
+
+pfkey_send_spdadd' :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
 pfkey_send_spdadd' s src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto policy seq = do
-  pid <- liftM fromIntegral $ getProcessID
+  pid <- liftM fromIntegral getProcessID
   let msg = (mkMsg MsgTypeSPDAdd SATypeUnspec 0 pid)
-        { msgAddressSrc = Just $ Address { addressProto = proto, addressPrefixLen = prefs, addressAddr = src }
-        , msgAddressDst = Just $ Address { addressProto = proto, addressPrefixLen = prefd, addressAddr = dst }
+        { msgAddressSrc = Just $ Address { addressProto = fromIntegral $ packIPProto proto, addressPrefixLen = prefs, addressAddr = src }
+        , msgAddressDst = Just $ Address { addressProto = fromIntegral $ packIPProto proto, addressPrefixLen = prefd, addressAddr = dst }
         , msgPolicy = Just policy
         }
   pfkey_send s msg
   return ()
 
+pfkey_send_add :: PfSocket -> SAType -> IPSecMode -> Address -> Address -> Int -> Int -> Int -> AuthAlg -> Key -> EncAlg -> Key -> Int -> Maybe Lifetime -> Maybe Lifetime -> Int -> IO ()
+pfkey_send_add s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey flags sltm hltm seq = do
+  pid <- liftM fromIntegral getProcessID
+  let msg = (mkMsg MsgTypeAdd satyp seq pid)
+        { msgAddressSrc = Just src
+        , msgAddressDst = Just dst
+        , msgSA = Just $ SA { saSPI = spi, saReplay = reply, saState = SAStateLarval, saAuth = authAlg, saEncrypt = encAlg, saFlags = flags }
+        , msgSA2 = Just $ SA2 { sa2Mode = mode, sa2Sequence = 0, sa2ReqId = reqid }
+        , msgKeyAuth = Just authKey
+        , msgKeyEncrypt = Just encKey
+        , msgLifetimeHard = hltm
+        , msgLifetimeSoft = sltm
+        }
+  pfkey_send s msg
+  return ()
+
+pfkey_send_delete :: PfSocket -> SAType -> Address -> Address -> Int -> IO ()
+pfkey_send_delete s = pfkey_send_x2 s MsgTypeDelete
+
+pfkey_send_delete_all :: PfSocket -> SAType -> Address -> Address -> IO ()
+pfkey_send_delete_all s satyp src dst = do
+  pid <- liftM fromIntegral getProcessID
+  let msg = (mkMsg MsgTypeDelete satyp 0 pid)
+        { msgAddressSrc = Just src
+        , msgAddressDst = Just dst
+        }
+  pfkey_send s msg
+  return ()
+
+pfkey_send_get :: PfSocket -> SAType -> Address -> Address -> Int -> IO ()
+pfkey_send_get s = pfkey_send_x2 s MsgTypeGet
 
 pfkey_send_register :: PfSocket -> SAType -> IO ()
-pfkey_send_register s satyp =
-  pfkey_send_x3 s MsgTypeRegister satyp
+pfkey_send_register s = pfkey_send_x3 s MsgTypeRegister
 
-pfkey_recv_register :: PfSocket -> IO ()
+pfkey_recv_register :: PfSocket -> IO (Maybe Supported, Maybe Supported)
 pfkey_recv_register s = do
   msg <- pfkey_recv s
-  case msg of
-    Nothing -> return ()
-    msg' -> print msg
-  return ()
+  return $ maybe (Nothing, Nothing) (\msg' -> (msgSupportedAuth msg', msgSupportedEncrypt msg')) msg
 
 pfkey_send_spdflush :: PfSocket -> IO ()
 pfkey_send_spdflush s = pfkey_send_x3 s MsgTypeSPDFlush SATypeUnspec
 
 pfkey_send_spddump :: PfSocket -> IO ()
 pfkey_send_spddump s = pfkey_send_x3 s MsgTypeSPDDump SATypeUnspec
-
 
 iterateM_ :: (Monad m) => m Bool -> m ()
 iterateM_ m = do

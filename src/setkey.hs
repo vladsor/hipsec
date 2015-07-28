@@ -133,16 +133,19 @@ doCommand s CommandSPDDump = do
               print $ "Message" ++ show msg ++ "\n"
               pfkey_spd_dump msg
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
-doCommand s (CommandAdd src dst proto spi encAlg encKey authAlg authKey compAlg) = do
+doCommand s (CommandAdd src dst proto spi encAlg encKey authAlg authKey compAlg) =
   pfkey_send_add s proto IPSecModeAny src dst spi 0 0 authAlg authKey encAlg encKey 0 Nothing Nothing 0
-doCommand s (CommandGet src dst proto spi) = undefined
-doCommand s (CommandDelete src dst proto spi) = undefined
-doCommand s (CommandDeleteAll src dst proto) = undefined
-doCommand s (CommandSPDAdd (Address _ prefs src) (Address _ prefd dst) upper label policy) = do
-  pfkey_send_spdadd' s src prefs dst prefd (fromIntegral $ packIPProto upper) policy 0
+doCommand s (CommandGet src dst proto spi) =
+  pfkey_send_get s proto src dst spi
+doCommand s (CommandDelete src dst proto spi) =
+  pfkey_send_delete s proto src dst spi
+doCommand s (CommandDeleteAll src dst proto) =
+  pfkey_send_delete_all s proto src dst
+doCommand s (CommandSPDAdd (Address _ prefs src) (Address _ prefd dst) upper label policy) =
+  pfkey_send_spdadd' s src prefs dst prefd upper policy 0
 doCommand s (CommandSPDAddTagged tag policy) = undefined
-doCommand s (CommandSPDDelete src dst upper dir) = undefined
---doCommand _ _ = error "doCommand error"
+doCommand s (CommandSPDDelete (Address _ prefs src) (Address _ prefd dst) upper policy) =
+  pfkey_send_spddelete s src prefs dst prefd upper policy 0
 
 data Token = Token { tknString :: String }
            | TokenNumber { tknNumber :: Int }
@@ -386,7 +389,10 @@ cmdSPDDelete = do
   spdDeleteSrcRange <- tokenAddressRange
   spdDeleteDstRange <- tokenAddressRange
   spdDeleteUppperspec <- liftM read tokenString
-  spdDeleteDirection <- liftM read tokenString
+  token "-"
+  token "P"
+  let spdAddLabel = Nothing
+  spdDeletePolicy <- tokenPolicy
   return CommandSPDDelete{..}
 
 data Command
@@ -437,7 +443,7 @@ data Command
     { spdDeleteSrcRange   :: Address
     , spdDeleteDstRange   :: Address
     , spdDeleteUppperspec :: IPProto
-    , spdDeleteDirection  :: IPSecDir
+    , spdDeletePolicy  :: Policy
     }
   deriving (Eq, Show)
 

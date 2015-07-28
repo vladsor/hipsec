@@ -29,12 +29,17 @@ module Network.Security.Message
   , IPProto(..)
   , packIPProto
   , unpackIPProto
-  , IPSecDir
-  , IPSecMode
+  , IPSecDir(..)
+  , IPSecMode(..)
   , IPSecLevel
   , defaultMsg
   , Sizable(..)
   , Key(..)
+  , EncAlg(..)
+  , AuthAlg(..)
+  , CompAlg(..)
+  , SAState(..)
+  , Supported(..)
   ) where
 
 import qualified Data.ByteString.Lazy as LBS
@@ -515,6 +520,20 @@ unpackSAType t = case t of
   (#const SADB_SATYPE_RIPV2) -> SATypeRIPv2
   (#const SADB_SATYPE_MIP) -> SATypeMIP
   (#const SADB_X_SATYPE_IPCOMP) -> SATypeIPComp
+
+instance Read SAType where
+  readsPrec _ =
+    tryParse
+      [ ("unspec", SATypeUnspec)
+      , ("unknown", SATypeUnspec1)
+      , ("ah", SATypeAH)
+      , ("esp", SATypeESP)
+      , ("rsvp", SATypeRSVP)
+      , ("ospfv2", SATypeOSPFv2)
+      , ("ripv2", SATypeRIPv2)
+      , ("mip", SATypeMIP)
+      , ("ipcomp", SATypeIPComp)
+      ]
 
 data ExtHdr = ExtHdr { exthdrLen :: Int
                      , exthdrType :: Int
@@ -1321,7 +1340,7 @@ instance Show IPSecLevel where
   show IPSecLevelUnique = "unique"
 
 instance Read IPSecLevel where
-  readsPrec _ = 
+  readsPrec _ =
     tryParse
     [ ("default", IPSecLevelDefault)
     , ("use", IPSecLevelUse)
@@ -1457,6 +1476,20 @@ unpackAuthAlg t = case t of
   (#const SADB_X_AALG_AES_XCBC_MAC) -> AuthAlgAES_XCBC_MAC
   (#const SADB_X_AALG_NULL) -> AuthAlgNull
 
+instance Read AuthAlg where
+  readsPrec _ =
+    tryParse
+      [ ("none", AuthAlgNone)
+      , ("hmac-md5", AuthAlgMD5HMAC)
+      , ("hmac-sha1", AuthAlgSHA1HMAC)
+      , ("hmac-sha2-256", AuthAlgSHA2_256HMAC)
+      , ("hmac-sha2-384", AuthAlgSHA2_384HMAC)
+      , ("hmac-sha2-512", AuthAlgSHA2_512HMAC)
+      , ("hmac-ripemd160", AuthAlgRIPEMD160HMAC)
+      , ("aes-xcbc", AuthAlgAES_XCBC_MAC)
+      , ("null", AuthAlgNull)
+      ]
+
 data EncAlg = EncAlgNone
             | EncAlgDES_CBC
             | EncAlg3DES_CBC
@@ -1538,6 +1571,29 @@ unpackEncAlg t = case t of
   (#const SADB_X_EALG_NULL_AES_GMAC) -> EncAlgNullAES_GMAC
   (#const SADB_X_EALG_SERPENTCBC) -> EncAlgSerpentCBC
   (#const SADB_X_EALG_TWOFISHCBC) -> EncAlgTwofishCBC
+
+instance Read EncAlg where
+  readsPrec _ =
+    tryParse
+      [ ("none", EncAlgNone)
+      , ("des-cbc", EncAlgDES_CBC)
+      , ("3des-cbc", EncAlg3DES_CBC)
+      , ("cast-cbc", EncAlgCAST_CBC)
+      , ("blowfish-cbc", EncAlgBLOWFISH_CBC)
+      , ("null", EncAlgNull)
+      , ("aes-cbc", EncAlgAES_CBC)
+      , ("aes-ctr", EncAlgAES_CTR)
+      , ("aes-ccm-icv8", EncAlgAES_CCM_ICV8)
+      , ("aes-ccm-icv12", EncAlgAES_CCM_ICV12)
+      , ("aes-ccm-icv16", EncAlgAES_CCM_ICV16)
+      , ("aes-gcm-icv8", EncAlgAES_GCM_ICV8)
+      , ("aes-gcm-icv12", EncAlgAES_GCM_ICV12)
+      , ("aes-gcm-icv16", EncAlgAES_GCM_ICV16)
+      , ("camellia-cbc", EncAlgCamelliaCBC)
+      , ("null-aes-gmac", EncAlgNullAES_GMAC)
+      , ("serpent-cbc", EncAlgSerpentCBC)
+      , ("twofish-cbc", EncAlgTwofishCBC)
+    ]
 
 data CompAlg = CompAlgNone
              | CompAlgOUI
