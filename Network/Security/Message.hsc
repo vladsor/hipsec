@@ -255,7 +255,7 @@ instance Binary Msg where
      putWord16le 0
      putWord32le $ fromIntegral msgSeq
      putWord32le $ fromIntegral msgPid
-     let putM = (put .) . flip liftM
+     let putM v f = maybe (return ()) (put . f) v
      putM msgPolicy ExtensionPolicy
      putM msgSA ExtensionSA
      putM msgLifetimeCurrent ExtensionLifetimeCurrent
