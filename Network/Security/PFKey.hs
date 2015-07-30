@@ -7,9 +7,11 @@ module Network.Security.PFKey
   , sendDump
   , sendPromisc
   , sendSPDAdd
+  , sendSPDUpdate
   , sendSPDDelete
   , sendSPDAdd'
   , sendAdd
+  , sendUpdate
   , sendDelete
   , sendDeleteAll
   , sendGet
@@ -105,6 +107,10 @@ sendSPDAdd :: Socket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy 
 sendSPDAdd s src prefs dst prefd proto policy seq =
   send4 s MsgTypeSPDAdd src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
+sendSPDUpdate :: Socket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
+sendSPDUpdate s src prefs dst prefd proto policy seq =
+  send4 s MsgTypeSPDUpdate src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
+
 sendSPDDelete :: Socket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
 sendSPDDelete s src prefs dst prefd proto policy seq =
   send4 s MsgTypeSPDDelete src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
@@ -124,6 +130,21 @@ sendAdd :: Socket -> SAType -> IPSecMode -> Address -> Address -> Int -> Int -> 
 sendAdd s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey flags sltm hltm seq = do
   pid <- liftM fromIntegral getProcessID
   let msg = (mkMsg MsgTypeAdd satyp seq pid)
+        { msgAddressSrc = Just src
+        , msgAddressDst = Just dst
+        , msgSA = Just $ SA { saSPI = spi, saReplay = reply, saState = SAStateLarval, saAuth = authAlg, saEncrypt = encAlg, saFlags = flags }
+        , msgSA2 = Just $ SA2 { sa2Mode = mode, sa2Sequence = 0, sa2ReqId = reqid }
+        , msgKeyAuth = Just authKey
+        , msgKeyEncrypt = Just encKey
+        , msgLifetimeHard = hltm
+        , msgLifetimeSoft = sltm
+        }
+  void $ send s msg
+
+sendUpdate :: Socket -> SAType -> IPSecMode -> Address -> Address -> Int -> Int -> Int -> AuthAlg -> Key -> EncAlg -> Key -> Int -> Maybe Lifetime -> Maybe Lifetime -> Int -> IO ()
+sendUpdate s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey flags sltm hltm seq = do
+  pid <- liftM fromIntegral getProcessID
+  let msg = (mkMsg MsgTypeUpdate satyp seq pid)
         { msgAddressSrc = Just src
         , msgAddressDst = Just dst
         , msgSA = Just $ SA { saSPI = spi, saReplay = reply, saState = SAStateLarval, saAuth = authAlg, saEncrypt = encAlg, saFlags = flags }

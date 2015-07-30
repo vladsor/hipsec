@@ -126,23 +126,25 @@ doCommand s (CommandDeleteAll src dst proto) =
   PFKey.sendDeleteAll s proto src dst
 doCommand s (CommandSPDAdd (Address _ prefs src) (Address _ prefd dst) upper label policy) =
   PFKey.sendSPDAdd' s src prefs dst prefd upper policy 0
-doCommand s (CommandSPDAddTagged tag policy) = undefined
+doCommand s (CommandSPDAddTagged tag policy) = error "command 'spdadd tagged' not supported"
 doCommand s (CommandSPDDelete (Address _ prefs src) (Address _ prefd dst) upper policy) =
   PFKey.sendSPDDelete s src prefs dst prefd upper policy 0
-doCommand s (CommandSPDUpdate (Address _ prefs src) (Address _ prefd dst) upper label policy) = undefined
-doCommand s (CommandSPDUpdateTagged tag policy) = undefined
+doCommand s (CommandSPDUpdate (Address _ prefs src) (Address _ prefd dst) upper label policy) =
+  PFKey.sendSPDUpdate s src prefs dst prefd upper policy 0
+doCommand s (CommandSPDUpdateTagged tag policy) = error "command 'spdupdate tagged' not supported"
 
-data Token = Token { tknString :: String }
-           | TokenNumber { tknNumber :: Int }
-           | TokenHexString { tknHexString :: String }
-           | TokenQuotedString { tknQuotedString :: String }
-           | TokenEOC
-           | TokenSlash
-           | TokenSqBrOpen
-           | TokenSqBrClose
-           | TokenDot
-           | TokenComment { tknComment :: String }
-           deriving (Eq, Show)
+data Token
+  = Token { tknString :: String }
+  | TokenNumber { tknNumber :: Int }
+  | TokenHexString { tknHexString :: String }
+  | TokenQuotedString { tknQuotedString :: String }
+  | TokenEOC
+  | TokenSlash
+  | TokenSqBrOpen
+  | TokenSqBrClose
+  | TokenDot
+  | TokenComment { tknComment :: String }
+  deriving (Eq, Show)
 
 separator = P.many1 (P.oneOf " \t\n")
 tokenize = P.many $ do
