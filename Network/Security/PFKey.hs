@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards       #-}
+
 module Network.Security.PFKey
   ( Socket
   , open
@@ -159,14 +161,26 @@ sendUpdate s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey fl
 sendDelete :: Socket -> SAType -> Address -> Address -> Int -> IO ()
 sendDelete s = send2 s MsgTypeDelete
 
+grepSPI :: Socket -> SAType -> [Address] -> [Address] -> IO [Int]
+grepSPI s satyp srcs dsts = send3 s MsgTypeDump satyp >> go []
+  where
+    go acc = do
+      res <- recv s
+      case res of
+        Nothing -> return acc
+        Just (Msg{..}) | msgType /= MsgTypeDump -> return acc
+        Just (Msg{..}) | msgErrno /= 0 -> return acc
+        Just (Msg{..}) | msgSatype /= satyp -> go acc
+        Just (Msg{..}) -> (\acc' -> if msgSeq /= 0 then go acc' else return acc') $ fromMaybe acc $ do
+          src <- msgAddressSrc
+          dst <- msgAddressDst
+          sa <- msgSA
+          if (any (== src) srcs) && (any (== dst) dsts) then Just (acc ++ [saSPI sa]) else Nothing
+
+
 sendDeleteAll :: Socket -> SAType -> Address -> Address -> IO ()
 sendDeleteAll s satyp src dst = do
-  pid <- liftM fromIntegral getProcessID
-  let msg = (mkMsg MsgTypeDelete satyp 0 pid)
-        { msgAddressSrc = Just src
-        , msgAddressDst = Just dst
-        }
-  void $ send s msg
+  mapM_ (sendDelete s satyp src dst) =<< (grepSPI s satyp [src] [dst])
 
 sendGet :: Socket -> SAType -> Address -> Address -> Int -> IO ()
 sendGet s = send2 s MsgTypeGet

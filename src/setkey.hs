@@ -303,7 +303,7 @@ cmdDelete = do
   deleteSrc <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
   deleteDst <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
   deleteProto <- liftM read tokenString
-  deleteSPI <- liftM read tokenString
+  deleteSPI <- tokenNumber
   return CommandDelete{..}
 
 cmdDeleteAll = do
