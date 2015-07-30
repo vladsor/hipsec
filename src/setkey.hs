@@ -15,8 +15,8 @@ import qualified Data.ByteString.Lazy     as LBS
 import           Data.Char
 import           Data.Time.Clock
 import           Network.Security.Message
-import           Network.Security.PFKey
-import           Network.Socket
+import qualified Network.Security.PFKey as PFKey
+import           Network.Socket (SockAddr(..), HostAddress(..))
 import           System.Console.CmdArgs
 import           System.IO                (stdin)
 import qualified Text.Parsec              as P
@@ -53,42 +53,24 @@ main = do
   case policy opts of
     True -> do
       when (dump opts) $ do
-        s <- pfkey_open
-        pfkey_send_spddump s
-        whileM $ do
-          res <- pfkey_recv s
-          case res of
-            Nothing -> print "Nothing\n" >> return False
-            Just msg -> do
-              print $ "Message" ++ show msg ++ "\n"
-              pfkey_spd_dump msg
-              return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
-        pfkey_close s
-      return ()
+        s <-PFKey.open
+        doCommand s CommandSPDDump
+        PFKey.close s
       when (flush opts) $ do
         putStrLn "SPD Flush"
-        s <- pfkey_open
-        pfkey_send_spdflush s
-        pfkey_close s
+        s <- PFKey.open
+        doCommand s CommandSPDFlush
+        PFKey.close s
     False -> do
       when (dump opts) $ do
-        s <- pfkey_open
-        pfkey_send_dump s SATypeUnspec
-        whileM $ do
-          res <- pfkey_recv s
-          case res of
-            Nothing -> print "Nothing\n" >> return False
-            Just msg -> do
-              print $ "Message" ++ show msg ++ "\n"
-              ct <- getCurrentTime
-              putStrLn $ pfkey_sa_dump msg ct
-              return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
-        pfkey_close s
+        s <- PFKey.open
+        doCommand s CommandDump
+        PFKey.close s
       when (flush opts) $ do
         putStrLn "SAD Flush"
-        s <- pfkey_open
+        s <- PFKey.open
         doCommand s CommandFlush
-        pfkey_close s
+        PFKey.close s
 
   when (cmds opts) $ do
     putStrLn "Read commands"
@@ -104,49 +86,49 @@ main = do
           Left err' -> print err'
           Right cmds -> do
             print cmds
-            s <- pfkey_open
-            pfkey_send_register s SATypeUnspec
-            pfkey_recv_register s
+            s <- PFKey.open
+            PFKey.sendRegister s SATypeUnspec
+            PFKey.recvRegister s
             mapM_ (doCommand s) cmds
-            pfkey_close s
+            PFKey.close s
 
-doCommand :: PfSocket -> Command -> IO ()
-doCommand s CommandFlush = pfkey_send_flush s SATypeUnspec
+doCommand :: PFKey.Socket -> Command -> IO ()
+doCommand s CommandFlush = PFKey.sendFlush s SATypeUnspec
 doCommand s CommandDump = do
-        pfkey_send_dump s SATypeUnspec
+        PFKey.sendDump s SATypeUnspec
         whileM $ do
-          res <- pfkey_recv s
+          res <- PFKey.recv s
           case res of
             Nothing -> print "Nothing\n" >> return False
             Just msg -> do
               print $ "Message" ++ show msg ++ "\n"
               ct <- getCurrentTime
-              putStrLn $ pfkey_sa_dump msg ct
+              putStrLn $ PFKey.dumpSA msg ct
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
-doCommand s CommandSPDFlush = pfkey_send_flush s SATypeUnspec
+doCommand s CommandSPDFlush = PFKey.sendFlush s SATypeUnspec
 doCommand s CommandSPDDump = do
-        pfkey_send_spddump s
+        PFKey.sendSPDDump s
         whileM $ do
-          res <- pfkey_recv s
+          res <- PFKey.recv s
           case res of
             Nothing -> print "Nothing\n" >> return False
             Just msg -> do
               print $ "Message" ++ show msg ++ "\n"
-              pfkey_spd_dump msg
+              PFKey.dumpSPD msg
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
 doCommand s (CommandAdd src dst proto spi encAlg encKey authAlg authKey compAlg) =
-  pfkey_send_add s proto IPSecModeAny src dst spi 0 0 authAlg authKey encAlg encKey 0 Nothing Nothing 0
+  PFKey.sendAdd s proto IPSecModeAny src dst spi 0 0 authAlg authKey encAlg encKey 0 Nothing Nothing 0
 doCommand s (CommandGet src dst proto spi) =
-  pfkey_send_get s proto src dst spi
+  PFKey.sendGet s proto src dst spi
 doCommand s (CommandDelete src dst proto spi) =
-  pfkey_send_delete s proto src dst spi
+  PFKey.sendDelete s proto src dst spi
 doCommand s (CommandDeleteAll src dst proto) =
-  pfkey_send_delete_all s proto src dst
+  PFKey.sendDeleteAll s proto src dst
 doCommand s (CommandSPDAdd (Address _ prefs src) (Address _ prefd dst) upper label policy) =
-  pfkey_send_spdadd' s src prefs dst prefd upper policy 0
+  PFKey.sendSPDAdd' s src prefs dst prefd upper policy 0
 doCommand s (CommandSPDAddTagged tag policy) = undefined
 doCommand s (CommandSPDDelete (Address _ prefs src) (Address _ prefd dst) upper policy) =
-  pfkey_send_spddelete s src prefs dst prefd upper policy 0
+  PFKey.sendSPDDelete s src prefs dst prefd upper policy 0
 doCommand s (CommandSPDUpdate (Address _ prefs src) (Address _ prefd dst) upper label policy) = undefined
 doCommand s (CommandSPDUpdateTagged tag policy) = undefined
 

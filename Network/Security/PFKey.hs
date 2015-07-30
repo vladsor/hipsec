@@ -1,29 +1,26 @@
-{-# LANGUAGE EmptyDataDecls        #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeFamilies          #-}
-
 module Network.Security.PFKey
-  ( PfSocket
-  , pfkey_open
-  , pfkey_close
-  , pfkey_recv
-  , pfkey_send_flush
-  , pfkey_send_dump
-  , pfkey_send_promisc
-  , pfkey_send_spdadd
-  , pfkey_send_spddelete
-  , pfkey_send_spdadd'
-  , pfkey_send_add
-  , pfkey_send_delete
-  , pfkey_send_delete_all
-  , pfkey_send_get
-  , pfkey_send_register
-  , pfkey_recv_register
-  , pfkey_send_spdflush
-  , pfkey_send_spddump
-  , pfkey_sa_dump
-  , pfkey_spd_dump
+  ( Socket
+  , open
+  , close
+  , recv
+  , sendFlush
+  , sendDump
+  , sendPromisc
+  , sendSPDAdd
+  , sendSPDDelete
+  , sendSPDAdd'
+  , sendAdd
+  , sendDelete
+  , sendDeleteAll
+  , sendGet
+  , sendRegister
+  , recvRegister
+  , sendSPDFlush
+  , sendSPDDump
+  , dumpSA
+  , dumpSPD
   ) where
+
 import           Control.Monad
 import           Data.Binary
 import           Data.Bits
@@ -50,8 +47,6 @@ import           System.Posix.IO.Select.FdSet
 import           System.Posix.IO.Select.Types
 import           System.Posix.Process
 import           System.Posix.Types
-import           System.Socket                hiding (getNameInfo)
-import           System.Socket.Unsafe
 import           Text.Printf
 
 mkMsg :: MsgType -> SAType -> Int -> Int -> Msg
@@ -61,19 +56,18 @@ mkMsg typ satyp seq pid =
       , msgSeq = seq
       }
 
-pfkey_send_x2 :: PfSocket -> MsgType -> SAType -> Address -> Address -> Int -> IO ()
-pfkey_send_x2 s typ satype src dst spi = do
+send2 :: Socket -> MsgType -> SAType -> Address -> Address -> Int -> IO ()
+send2 s typ satype src dst spi = do
   pid <- liftM fromIntegral getProcessID
   let msg = (mkMsg typ satype 0 pid)
         { msgAddressSrc = Just src
         , msgAddressDst = Just dst
         , msgSA = Just $ SA { saSPI = spi, saReplay = 0, saState = SAStateLarval, saAuth = AuthAlgNone, saEncrypt = EncAlgNone, saFlags = 0 }
         }
-  pfkey_send s msg
-  return ()
+  void $ send s msg
 
-pfkey_send_x3 :: PfSocket -> MsgType -> SAType -> IO ()
-pfkey_send_x3 s typ satyp = case typ of
+send3 :: Socket -> MsgType -> SAType -> IO ()
+send3 s typ satyp = case typ of
   MsgTypePromisc | satyp /= SATypeUnspec && satyp /= SATypeUnspec1 -> return ()
   MsgTypePromisc -> send'
   _ -> case satyp of
@@ -84,11 +78,10 @@ pfkey_send_x3 s typ satyp = case typ of
     _ -> return ()
   where send' = do
           pid <- liftM fromIntegral getProcessID
-          let msg = mkMsg typ satyp 0 pid
-          pfkey_send s msg
+          void $ send s $ mkMsg typ satyp 0 pid
 
-pfkey_send_x4 :: PfSocket -> MsgType -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> UTCTime -> UTCTime -> Policy -> Int -> IO ()
-pfkey_send_x4 s typ src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto ltime vtime policy seq = do
+send4 :: Socket -> MsgType -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> UTCTime -> UTCTime -> Policy -> Int -> IO ()
+send4 s typ src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto ltime vtime policy seq = do
   pid <- liftM fromIntegral getProcessID
   let msg = (mkMsg typ SATypeUnspec 0 pid)
         { msgAddressSrc = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefs, addressAddr = src }
@@ -96,42 +89,39 @@ pfkey_send_x4 s typ src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd pr
         , msgLifetimeHard = Just $ Lifetime { ltAllocations = 0, ltBytes = 0, ltAddTime = ltime, ltUseTime = vtime }
         , msgPolicy = Just policy
         }
-  pfkey_send s msg
-  return ()
-pfkey_send_x4 _ _ _ _ _ _ _ _ _ _ _ = error "unsupported parameters"
+  void $ send s msg
+send4 _ _ _ _ _ _ _ _ _ _ _ = error "unsupported parameters"
 
-pfkey_send_flush :: PfSocket -> SAType -> IO ()
-pfkey_send_flush s satyp = pfkey_send_x3 s MsgTypeFlush satyp
+sendFlush :: Socket -> SAType -> IO ()
+sendFlush s = send3 s MsgTypeFlush
 
-pfkey_send_dump :: PfSocket -> SAType -> IO ()
-pfkey_send_dump s satyp = pfkey_send_x3 s MsgTypeDump satyp
+sendDump :: Socket -> SAType -> IO ()
+sendDump s = send3 s MsgTypeDump
 
-pfkey_send_promisc :: PfSocket -> Bool -> IO ()
-pfkey_send_promisc s b = pfkey_send_x3 s MsgTypePromisc
-                         (if b then SATypeUnspec1 else SATypeUnspec)
+sendPromisc :: Socket -> Bool -> IO ()
+sendPromisc s b = send3 s MsgTypePromisc $ if b then SATypeUnspec1 else SATypeUnspec
 
-pfkey_send_spdadd :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
-pfkey_send_spdadd s src prefs dst prefd proto policy seq =
-  pfkey_send_x4 s MsgTypeSPDAdd src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
+sendSPDAdd :: Socket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
+sendSPDAdd s src prefs dst prefd proto policy seq =
+  send4 s MsgTypeSPDAdd src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
-pfkey_send_spddelete :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
-pfkey_send_spddelete s src prefs dst prefd proto policy seq =
-  pfkey_send_x4 s MsgTypeSPDDelete src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
+sendSPDDelete :: Socket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
+sendSPDDelete s src prefs dst prefd proto policy seq =
+  send4 s MsgTypeSPDDelete src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
-pfkey_send_spdadd' :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
-pfkey_send_spdadd' s src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto policy seq = do
+sendSPDAdd' :: Socket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
+sendSPDAdd' s src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto policy seq = do
   pid <- liftM fromIntegral getProcessID
   let msg = (mkMsg MsgTypeSPDAdd SATypeUnspec 0 pid)
         { msgAddressSrc = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefs, addressAddr = src }
         , msgAddressDst = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefd, addressAddr = dst }
         , msgPolicy = Just policy
         }
-  pfkey_send s msg
-  return ()
-pfkey_send_spdadd' _ _ _ _ _ _ _ _ = error "invalid params"
+  void $ send s msg
+sendSPDAdd' _ _ _ _ _ _ _ _ = error "invalid params"
 
-pfkey_send_add :: PfSocket -> SAType -> IPSecMode -> Address -> Address -> Int -> Int -> Int -> AuthAlg -> Key -> EncAlg -> Key -> Int -> Maybe Lifetime -> Maybe Lifetime -> Int -> IO ()
-pfkey_send_add s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey flags sltm hltm seq = do
+sendAdd :: Socket -> SAType -> IPSecMode -> Address -> Address -> Int -> Int -> Int -> AuthAlg -> Key -> EncAlg -> Key -> Int -> Maybe Lifetime -> Maybe Lifetime -> Int -> IO ()
+sendAdd s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey flags sltm hltm seq = do
   pid <- liftM fromIntegral getProcessID
   let msg = (mkMsg MsgTypeAdd satyp seq pid)
         { msgAddressSrc = Just src
@@ -143,38 +133,36 @@ pfkey_send_add s satyp mode src dst spi reqid reply authAlg authKey encAlg encKe
         , msgLifetimeHard = hltm
         , msgLifetimeSoft = sltm
         }
-  pfkey_send s msg
-  return ()
+  void $ send s msg
 
-pfkey_send_delete :: PfSocket -> SAType -> Address -> Address -> Int -> IO ()
-pfkey_send_delete s = pfkey_send_x2 s MsgTypeDelete
+sendDelete :: Socket -> SAType -> Address -> Address -> Int -> IO ()
+sendDelete s = send2 s MsgTypeDelete
 
-pfkey_send_delete_all :: PfSocket -> SAType -> Address -> Address -> IO ()
-pfkey_send_delete_all s satyp src dst = do
+sendDeleteAll :: Socket -> SAType -> Address -> Address -> IO ()
+sendDeleteAll s satyp src dst = do
   pid <- liftM fromIntegral getProcessID
   let msg = (mkMsg MsgTypeDelete satyp 0 pid)
         { msgAddressSrc = Just src
         , msgAddressDst = Just dst
         }
-  pfkey_send s msg
-  return ()
+  void $ send s msg
 
-pfkey_send_get :: PfSocket -> SAType -> Address -> Address -> Int -> IO ()
-pfkey_send_get s = pfkey_send_x2 s MsgTypeGet
+sendGet :: Socket -> SAType -> Address -> Address -> Int -> IO ()
+sendGet s = send2 s MsgTypeGet
 
-pfkey_send_register :: PfSocket -> SAType -> IO ()
-pfkey_send_register s = pfkey_send_x3 s MsgTypeRegister
+sendRegister :: Socket -> SAType -> IO ()
+sendRegister s = send3 s MsgTypeRegister
 
-pfkey_recv_register :: PfSocket -> IO (Maybe Supported, Maybe Supported)
-pfkey_recv_register s = do
-  msg <- pfkey_recv s
+recvRegister :: Socket -> IO (Maybe Supported, Maybe Supported)
+recvRegister s = do
+  msg <- recv s
   return $ maybe (Nothing, Nothing) (\msg' -> (msgSupportedAuth msg', msgSupportedEncrypt msg')) msg
 
-pfkey_send_spdflush :: PfSocket -> IO ()
-pfkey_send_spdflush s = pfkey_send_x3 s MsgTypeSPDFlush SATypeUnspec
+sendSPDFlush :: Socket -> IO ()
+sendSPDFlush s = send3 s MsgTypeSPDFlush SATypeUnspec
 
-pfkey_send_spddump :: PfSocket -> IO ()
-pfkey_send_spddump s = pfkey_send_x3 s MsgTypeSPDDump SATypeUnspec
+sendSPDDump :: Socket -> IO ()
+sendSPDDump s = send3 s MsgTypeSPDDump SATypeUnspec
 
 pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport =
   case saddr of
@@ -194,8 +182,8 @@ pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport =
     _ -> ""
   ++ " "
 
-pfkey_sa_dump :: Msg -> UTCTime -> String
-pfkey_sa_dump msg ct =
+dumpSA :: Msg -> UTCTime -> String
+dumpSA msg ct =
   let sa = msgSA msg
       sa2 = msgSA2 msg
       saddr = msgAddressSrc msg
@@ -292,8 +280,8 @@ pfkey_sa_dump_long msg ct sa' sa2' =
   ++ "\tsadb_seq=" ++ show seq ++ " pid=" ++ show pid ++ "\n"
 
 
-pfkey_spd_dump :: Msg -> IO ()
-pfkey_spd_dump msg = do
+dumpSPD :: Msg -> IO ()
+dumpSPD msg = do
         let saddr = msgAddressSrc msg
             daddr = msgAddressDst msg
             policy = msgPolicy msg
