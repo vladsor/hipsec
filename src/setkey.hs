@@ -327,25 +327,34 @@ tokenIP = do
 tokenPolicy :: P.Stream s m Token => P.ParsecT s u m Policy
 tokenPolicy = do
   policyDir <- liftM read tokenString
-  policyType <- liftM read tokenString
-  ipsecreqProto <- liftM read tokenString
-  tokenSlash
-  ipsecreqMode <- liftM read tokenString
-  tokenSlash
-  ipsecreqAddrs <- P.optionMaybe $ do
-    src <- tokenIP
-    token "-"
-    dst <- tokenIP
-    return (SockAddrInet 0 src, SockAddrInet 0 dst)
-  tokenSlash
+  policyType' <- P.optionMaybe $ liftM read tokenString
+  case policyType' of
+    Nothing -> do
+      let policyType = IPSecPolicyNone
+      let policyId = 0
+      let policyPriority = 0
+      let ipsecreqReqId = 0
+      let policyIPSecRequests = []
+      return Policy{..}
+    Just policyType -> do
+      ipsecreqProto <- liftM read tokenString
+      tokenSlash
+      ipsecreqMode <- liftM read tokenString
+      tokenSlash
+      ipsecreqAddrs <- P.optionMaybe $ do
+        src <- tokenIP
+        token "-"
+        dst <- tokenIP
+        return (SockAddrInet 0 src, SockAddrInet 0 dst)
+      tokenSlash
 
-  ipsecreqLevel <- liftM read tokenString
+      ipsecreqLevel <- liftM read tokenString
 
-  let policyId = 0
-  let policyPriority = 0
-  let ipsecreqReqId = 0
-  let policyIPSecRequests = return IPSecRequest{..}
-  return Policy{..}
+      let policyId = 0
+      let policyPriority = 0
+      let ipsecreqReqId = 0
+      let policyIPSecRequests = return IPSecRequest{..}
+      return Policy{..}
 
 tokenAddressRange :: P.Stream s m Token => P.ParsecT s u m Address
 tokenAddressRange = do
