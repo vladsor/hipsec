@@ -1,130 +1,65 @@
-{-# LANGUAGE CPP, MultiParamTypeClasses #-}
-{-# LANGUAGE ForeignFunctionInterface #-}
-{-# LANGUAGE EmptyDataDecls #-}
-{-# LANGUAGE TypeFamilies #-}
-#include <sys/ioctl.h>
-#include <sys/socket.h>
+{-# LANGUAGE EmptyDataDecls        #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeFamilies          #-}
 
-module Network.Security.PFKey where
+module Network.Security.PFKey
+  ( PfSocket
+  , pfkey_open
+  , pfkey_close
+  , pfkey_recv
+  , pfkey_send_flush
+  , pfkey_send_dump
+  , pfkey_send_promisc
+  , pfkey_send_spdadd
+  , pfkey_send_spddelete
+  , pfkey_send_spdadd'
+  , pfkey_send_add
+  , pfkey_send_delete
+  , pfkey_send_delete_all
+  , pfkey_send_get
+  , pfkey_send_register
+  , pfkey_recv_register
+  , pfkey_send_spdflush
+  , pfkey_send_spddump
+  , pfkey_sa_dump
+  , pfkey_spd_dump
+  ) where
+import           Control.Monad
+import           Data.Binary
+import           Data.Bits
+import qualified Data.ByteString              as BS
+import qualified Data.ByteString.Lazy         as LBS
+import           Data.Default
+import           Data.Hex
+import           Data.Maybe
+import           Data.Monoid
+import           Data.Time.Clock
+import qualified Data.Time.Clock              as Clock
+import           Data.Time.Clock.POSIX
+import           Data.Time.Format
+import           Debug.Trace
+import           Foreign.C.Types
+import           Foreign.Marshal.Alloc
+import           Foreign.Ptr
+import           Network.Security.Message
+import           Network.Security.PFSocket
+import           Network.Socket               (NameInfoFlag (..), SockAddr (..),
+                                               aNY_PORT, getNameInfo)
+import           System.Posix.IO.Select
+import           System.Posix.IO.Select.FdSet
+import           System.Posix.IO.Select.Types
+import           System.Posix.Process
+import           System.Posix.Types
+import           System.Socket                hiding (getNameInfo)
+import           System.Socket.Unsafe
+import           Text.Printf
 
-import Network.Security.Message
--- import Foreign.Storable ( Storable(..) )
-import Foreign.Ptr
-import Foreign.Marshal.Alloc
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
-import Data.Binary
-import System.Posix.Process
-import Control.Monad
-import Data.Bits
-import Data.Maybe
-import Text.Printf
-import qualified Data.Time.Clock as Clock
--- import Network.Socket.IOCtl
-import System.Posix.IO.Select
-import System.Posix.IO.Select.FdSet
-import System.Posix.IO.Select.Types
-import Foreign.C.Types
-import System.Posix.Types
-import Data.Time.Clock
-import Data.Time.Clock.POSIX
-import Data.Time.Format
-
-import System.Socket hiding (getNameInfo)
-import System.Socket.Unsafe
-
-import Debug.Trace
-import Foreign hiding (sizeOf)
-import Foreign.C
-import Data.Monoid
-import Data.Hex
-
-import Network.Socket (SockAddr(..), NameInfoFlag(..), aNY_PORT, getNameInfo)
-import Control.Concurrent.MVar
-foreign import ccall "ioctl" c_ioctl :: CInt -> CInt -> Ptr () -> IO CInt
-
-
-
-_PF_KEY_V2 = 2 :: Int
-
-data Pseudo_AF_KEY
-instance Storable Pseudo_AF_KEY
-
-instance Family Pseudo_AF_KEY where
-  type SocketAddress Pseudo_AF_KEY = Pseudo_AF_KEY
-  familyNumber _ = #const PF_KEY
-
-data PfKeyV2
-
-instance Protocol PfKeyV2 where
-  protocolNumber = const 2
-
-data RecvBuffer = RecvBuffer CInt
-
-instance SetSocketOption RecvBuffer where
-  setSocketOption s (RecvBuffer sz) = unsafeSetSocketOption s (1) (#const SO_RCVBUF) sz
-
-data SendBuffer = SendBuffer CInt
-instance SetSocketOption SendBuffer where
-  setSocketOption s (SendBuffer sz) = unsafeSetSocketOption s (1) (#const SO_SNDBUF) sz
-
-type PfSocket = Socket Pseudo_AF_KEY Raw PfKeyV2
-
-pfkey_open :: IO PfSocket
-pfkey_open = do
-  s <- socket :: IO PfSocket
-  setSocketOption s $ RecvBuffer (1024 * 1024)
-  setSocketOption s $ SendBuffer (128 * 1024)
-  putStrLn "pfkey_open"
-  return s
-
-pfkey_close :: PfSocket -> IO ()
-pfkey_close = close
-
-c_ioctl' :: Fd -> Ptr d -> IO ()
-c_ioctl' (Fd fd) p =
-    throwErrnoIfMinus1_ "ioctl" $
-            c_ioctl fd ((#const FIONREAD) :: CInt) (castPtr p)
-
-ioctlsocket' :: Fd -- ^ The socket
-             -> IO CInt -- ^ The data
-ioctlsocket' fd = alloca $ \p -> c_ioctl' fd p >> peek p
-
-pfkey_recv :: PfSocket -> IO (Maybe Msg)
-pfkey_recv s@(Socket mfd) = do
-  let hdrlen = (sizeOf (undefined::Msg)) :: Int
-  withMVar mfd $ \fd -> do
-    ret <- select'' [fd] [] [] (Time (CTimeval 10 0))
-    putStrLn $ "select:" ++ show ret
---    if (ret /= 1) then return Nothing else do
---    msglen <- (ioctlsocket' fd) >>= return . fromIntegral
---    if (msglen < hdrlen) then return Nothing else do
-    return ()
-  buf <- receive s (fromIntegral hdrlen) (MessageFlags (#const MSG_PEEK))
-  putStrLn $ "receive:" ++ show (BS.length buf)
-  let hdr = decode (LBS.fromStrict buf)
-  let msglen = (msgHdrLength hdr) `shift` 3
-  putStrLn $ "receive:" ++ show hdr ++ ":" ++ show msglen
-  buf' <- if msglen > 0 then receive s (fromIntegral msglen) mempty else return mempty
-  putStrLn $ "receive:" ++ show (BS.length buf')
-  if (BS.length buf' /= msglen) then return Nothing else do
-  return $ Just $ decode $ LBS.fromStrict $ buf'
-    
-pfkey_send :: PfSocket -> Msg -> IO ()
-pfkey_send s msg = do
-  putStrLn $ "pfkey_send before: " ++ show msg ++ ":" ++ show (LBS.length (encode msg))
-  LBS.putStrLn $ hex (encode msg)
-  send s (LBS.toStrict (encode msg)) mempty
-  putStrLn "pfkey_send after"
-  return ()
-  
-mkMsg :: MsgType -> SAType -> Int -> Int -> Msg 
-mkMsg typ satyp seq pid = defaultMsg { msgType = typ
-                                     , msgSatype = satyp
-                                     , msgLength = (sizeOf (undefined :: Msg)) `shiftR` 3
-                                     , msgSeq = seq
-                                     , msgPid = pid
-				     }
+mkMsg :: MsgType -> SAType -> Int -> Int -> Msg
+mkMsg typ satyp seq pid =
+  def { msgType = typ
+      , msgSatype = satyp
+      , msgSeq = seq
+      }
 
 pfkey_send_x2 :: PfSocket -> MsgType -> SAType -> Address -> Address -> Int -> IO ()
 pfkey_send_x2 s typ satype src dst spi = do
@@ -148,16 +83,16 @@ pfkey_send_x3 s typ satyp = case typ of
     SATypeIPComp -> send'
     _ -> return ()
   where send' = do
-          pid <- liftM fromIntegral $ getProcessID
+          pid <- liftM fromIntegral getProcessID
           let msg = mkMsg typ satyp 0 pid
           pfkey_send s msg
 
-pfkey_send_x4 :: PfSocket -> MsgType -> SockAddr -> Int -> SockAddr -> Int -> Int -> UTCTime -> UTCTime -> Policy -> Int -> IO ()
+pfkey_send_x4 :: PfSocket -> MsgType -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> UTCTime -> UTCTime -> Policy -> Int -> IO ()
 pfkey_send_x4 s typ src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto ltime vtime policy seq = do
   pid <- liftM fromIntegral getProcessID
-  let msg = (mkMsg typ SATypeUnspec 0 pid) 
-        { msgAddressSrc = Just $ Address { addressProto = proto, addressPrefixLen = prefs, addressAddr = src }
-        , msgAddressDst = Just $ Address { addressProto = proto, addressPrefixLen = prefd, addressAddr = dst }
+  let msg = (mkMsg typ SATypeUnspec 0 pid)
+        { msgAddressSrc = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefs, addressAddr = src }
+        , msgAddressDst = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefd, addressAddr = dst }
         , msgLifetimeHard = Just $ Lifetime { ltAllocations = 0, ltBytes = 0, ltAddTime = ltime, ltUseTime = vtime }
         , msgPolicy = Just policy
         }
@@ -172,27 +107,28 @@ pfkey_send_dump :: PfSocket -> SAType -> IO ()
 pfkey_send_dump s satyp = pfkey_send_x3 s MsgTypeDump satyp
 
 pfkey_send_promisc :: PfSocket -> Bool -> IO ()
-pfkey_send_promisc s b = pfkey_send_x3 s MsgTypePromisc 
+pfkey_send_promisc s b = pfkey_send_x3 s MsgTypePromisc
                          (if b then SATypeUnspec1 else SATypeUnspec)
 
-pfkey_send_spdadd :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> Int -> Policy -> Int -> IO ()
+pfkey_send_spdadd :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
 pfkey_send_spdadd s src prefs dst prefd proto policy seq =
   pfkey_send_x4 s MsgTypeSPDAdd src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
 pfkey_send_spddelete :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
 pfkey_send_spddelete s src prefs dst prefd proto policy seq =
-  pfkey_send_x4 s MsgTypeSPDDelete src prefs dst prefd (fromIntegral $ packIPProto proto) (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
+  pfkey_send_x4 s MsgTypeSPDDelete src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
 pfkey_send_spdadd' :: PfSocket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
 pfkey_send_spdadd' s src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto policy seq = do
   pid <- liftM fromIntegral getProcessID
   let msg = (mkMsg MsgTypeSPDAdd SATypeUnspec 0 pid)
-        { msgAddressSrc = Just $ Address { addressProto = fromIntegral $ packIPProto proto, addressPrefixLen = prefs, addressAddr = src }
-        , msgAddressDst = Just $ Address { addressProto = fromIntegral $ packIPProto proto, addressPrefixLen = prefd, addressAddr = dst }
+        { msgAddressSrc = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefs, addressAddr = src }
+        , msgAddressDst = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefd, addressAddr = dst }
         , msgPolicy = Just policy
         }
   pfkey_send s msg
   return ()
+pfkey_send_spdadd' _ _ _ _ _ _ _ _ = error "invalid params"
 
 pfkey_send_add :: PfSocket -> SAType -> IPSecMode -> Address -> Address -> Int -> Int -> Int -> AuthAlg -> Key -> EncAlg -> Key -> Int -> Maybe Lifetime -> Maybe Lifetime -> Int -> IO ()
 pfkey_send_add s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey flags sltm hltm seq = do
@@ -240,11 +176,6 @@ pfkey_send_spdflush s = pfkey_send_x3 s MsgTypeSPDFlush SATypeUnspec
 pfkey_send_spddump :: PfSocket -> IO ()
 pfkey_send_spddump s = pfkey_send_x3 s MsgTypeSPDDump SATypeUnspec
 
-iterateM_ :: (Monad m) => m Bool -> m ()
-iterateM_ m = do
-  r <- m
-  if r then iterateM_ m else return ()
-
 pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport =
   case saddr of
     Just (Address proto prefixlen addr) -> showAddr' addr proto prefixlen
@@ -262,7 +193,7 @@ pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport =
     (True, Just port) -> "[" ++ show port ++ "]"
     _ -> ""
   ++ " "
-  
+
 pfkey_sa_dump :: Msg -> UTCTime -> String
 pfkey_sa_dump msg ct =
   let sa = msgSA msg
@@ -274,15 +205,15 @@ pfkey_sa_dump msg ct =
       natt_dport = msgNATTDPort msg
       use_natt = case natt_type of
         Nothing -> False
-        Just typ -> natttypeType typ /= 0
-  in      
-   pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport ++ 
+        Just typ -> natttype typ /= 0
+  in
+   pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport ++
    case (sa, sa2) of
      (Nothing, Nothing) -> "No SA & SA2 extensions"
      (Just _, Nothing) -> "No SA2 extension"
      (Nothing, Just _) -> "No SA extension"
      (Just sa', Just sa2') ->  pfkey_sa_dump_long msg ct sa' sa2'
-     
+
 pfkey_sa_dump_long msg ct sa' sa2' =
   let lftc = msgLifetimeCurrent msg
       lfth = msgLifetimeHard msg
@@ -302,23 +233,23 @@ pfkey_sa_dump_long msg ct sa' sa2' =
       pid = msgPid msg
       satyp = msgSatype msg
       secctx = msgSecCtx msg
-      use_natt = case natt_type of 
+      use_natt = case natt_type of
         Nothing -> False
-        Just typ -> natttypeType typ /= 0
-  in      
-  "\n\t" ++ 
+        Just typ -> natttype typ /= 0
+  in
+  "\n\t" ++
   case (use_natt, satyp) of
      (True, SATypeESP) -> "esp-udp"
      (True, _) -> "natt+"
      _ -> ""
   ++  show satyp ++ " mode=" ++ show (sa2Mode sa2') ++ " " ++
-  printf "spi=%u(0x%08x) reqid=%u(0x%08x)\n" (saSPI sa') (saSPI sa') (sa2ReqId sa2') (sa2ReqId sa2') 
+  printf "spi=%u(0x%08x) reqid=%u(0x%08x)\n" (saSPI sa') (saSPI sa') (sa2ReqId sa2') (sa2ReqId sa2')
   ++ case (use_natt, natt_oa) of
     (True, Just oa) -> "\tNAT OA=" ++ show oa ++ "\n"
     _ -> ""
   ++ case satyp of
     SATypeIPComp -> "\tC: " ++ show (saEncrypt sa')
-    SATypeESP -> case enc of 
+    SATypeESP -> case enc of
       Nothing -> ""
       Just enc' -> "\tE: " ++ show (saEncrypt sa') ++ " " ++ show enc' ++ "\n"
     _ -> "Invalid satype"
@@ -330,9 +261,9 @@ pfkey_sa_dump_long msg ct sa' sa2' =
   ++ "state=" ++ show (saState sa') ++ "\n"
   ++ case lftc of
     Nothing -> ""
-    Just tm -> 
+    Just tm ->
           let off = Clock.diffUTCTime ct (ltAddTime tm) in
-          "\tcreated: " ++ strTime (ltAddTime tm) ++ 
+          "\tcreated: " ++ strTime (ltAddTime tm) ++
           "\tcurrent:" ++ (show ct) ++ "\n" ++
           "\tdiff:" ++ (if utcTimeToPOSIXSeconds (ltAddTime tm) == 0 then "0" else
                           show off) ++ "(s)"
@@ -350,7 +281,7 @@ pfkey_sa_dump_long msg ct sa' sa2' =
           ++ "\thard: " ++ fromMaybe "0" (fmap (show . ltAllocations) lfth)
           ++ "\tsoft: " ++ fromMaybe "0" (fmap (show . ltAllocations) lfts)
           ++ "\n"
-   
+
   ++ case secctx of
     Nothing -> ""
     Just (SecCtx alg doi len ) -> "\tsecurity context doi: " ++ show doi ++ "\n" ++
@@ -361,6 +292,7 @@ pfkey_sa_dump_long msg ct sa' sa2' =
   ++ "\tsadb_seq=" ++ show seq ++ " pid=" ++ show pid ++ "\n"
 
 
+pfkey_spd_dump :: Msg -> IO ()
 pfkey_spd_dump msg = do
         let saddr = msgAddressSrc msg
             daddr = msgAddressDst msg
@@ -373,7 +305,7 @@ pfkey_spd_dump msg = do
             policy' = case policy of
               Nothing -> error ""
               Just p -> p
-        when (policyId policy' .&. 7 >= 3) $ putStr "(per-socket policy)\n" 
+        when (policyId policy' .&. 7 >= 3) $ putStr "(per-socket policy)\n"
         case (saddr, daddr) of
             (Just (Address sproto sprefixlen saddr), Just (Address dproto dprefixlen daddr)) -> do
               sport <- case saddr of
@@ -394,11 +326,11 @@ pfkey_spd_dump msg = do
         ipsec_dump_policy policy'
         putStr $ case lftc of
           Nothing -> ""
-          Just tm -> "\tcreated: " ++ strTime (ltAddTime tm) ++ " lastused: " ++ strTime (ltUseTime tm) ++ "\n" 
+          Just tm -> "\tcreated: " ++ strTime (ltAddTime tm) ++ " lastused: " ++ strTime (ltUseTime tm) ++ "\n"
         putStr $ case lfth of
           Nothing -> ""
-          Just tm -> "\tlifetime: " ++ show (utcTimeToPOSIXSeconds . ltAddTime $ tm) ++ 
-                     "(s) validtime: " ++ show (utcTimeToPOSIXSeconds . ltUseTime $ tm) ++ "(s)\n" 
+          Just tm -> "\tlifetime: " ++ show (utcTimeToPOSIXSeconds . ltAddTime $ tm) ++
+                     "(s) validtime: " ++ show (utcTimeToPOSIXSeconds . ltUseTime $ tm) ++ "(s)\n"
         putStr $ case secctx of
           Nothing -> ""
           Just (SecCtx alg doi len ) -> "\tsecurity context doi: " ++ show doi ++ "\n" ++
@@ -413,7 +345,7 @@ strTime time = if (utcTimeToPOSIXSeconds time == 0) then ""
 
 strLifetimeByte :: Maybe Lifetime -> String -> String
 strLifetimeByte Nothing title = "\t" ++ title ++ "0(bytes)"
-strLifetimeByte (Just lt) title =        
+strLifetimeByte (Just lt) title =
   let
     y = fromIntegral (ltBytes lt) * 1.0 :: Float
     unit = ""
@@ -427,33 +359,33 @@ showAddr addr proto prefixlen = do
   putStr $ fromMaybe "" hostName
   putStr $ "/" ++ show prefixlen
   case addr of
-    SockAddrInet port _ -> if (port == aNY_PORT) then putStr "[any]" 
+    SockAddrInet port _ -> if (port == aNY_PORT) then putStr "[any]"
                            else putStr $ "[" ++ show port ++ "]"
-    SockAddrInet6 port _ _ _ -> if (port == aNY_PORT) then print "[any]" 
+    SockAddrInet6 port _ _ _ -> if (port == aNY_PORT) then print "[any]"
                                   else putStr $ "[" ++ show port ++ "]"
     _ -> error "unsupported family"
 
 showAddr' :: SockAddr -> Int -> Int -> String
-showAddr' addr proto prefixlen = 
+showAddr' addr proto prefixlen =
   show addr ++ "/" ++ show prefixlen ++
   case addr of
-    SockAddrInet port _ -> if (port == aNY_PORT) then "[any]" 
+    SockAddrInet port _ -> if (port == aNY_PORT) then "[any]"
                            else "[" ++ show port ++ "]"
-    SockAddrInet6 port _ _ _ -> if (port == aNY_PORT) then "[any]" 
+    SockAddrInet6 port _ _ _ -> if (port == aNY_PORT) then "[any]"
                                   else "[" ++ show port ++ "]"
     _ -> error "unsupported family"
 
 showProtocol :: Int -> Int -> Int -> IO ()
 showProtocol proto sport dport =
-  case unpackIPProto (fromIntegral proto) of
-    IPProtoAny -> putStr "any"
-    IPProtoICMPv6 -> do
+  case unpack (fromIntegral proto) of
+    Just IPProtoAny -> putStr "any"
+    Just IPProtoICMPv6 -> do
       putStr "icmp6"
-      when (not (sport == iPSecPortAny) && (sport == iPSecPortAny)) 
+      when (not (sport == iPSecPortAny) && (sport == iPSecPortAny))
         (putStr $ " " ++ show sport ++ "," ++ show dport)
-    IPProtoIPv4 -> putStr "ipv4"
+    Just IPProtoIPv4 -> putStr "ipv4"
     p -> putStr $ show p
-        
+
 priorityLow =     0xC0000000
 priorityDefault = 0x80000000
 priorityHigh    = 0x40000000
@@ -466,7 +398,7 @@ ipsec_dump_policy (Policy typ dir id prio reqs) = do
                           else ("prio low", prio - priorityDefault)
       (off', operator) = if (off > 0) then (off * (-1), "-") else (off, "+")
   if off /= 0 then do
-    putStr $ show dir ++ " " ++ str ++ "" ++ operator ++ " " ++ show off ++ " " ++ show typ 
+    putStr $ show dir ++ " " ++ str ++ "" ++ operator ++ " " ++ show off ++ " " ++ show typ
     else if str /= "" then do
                            putStr $ show dir ++ " " ++ str ++ " " ++ show typ
          else do
@@ -476,6 +408,7 @@ ipsec_dump_policy (Policy typ dir id prio reqs) = do
     sequence_ $ fmap ipsec_dump_ipsecrequest reqs
 
 iPSecManualReqidMax = 0x3fff
+
 ipsec_dump_ipsecrequest :: IPSecRequest -> IO ()
 ipsec_dump_ipsecrequest (IPSecRequest proto mode level 0 Nothing) =
   putStrLn $ show proto ++ "/" ++ show mode ++ "//" ++ show level

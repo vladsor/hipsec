@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -27,12 +28,9 @@ module Network.Security.Message
   , unpackSAType
   , iPSecPortAny
   , IPProto(..)
-  , packIPProto
-  , unpackIPProto
   , IPSecDir(..)
   , IPSecMode(..)
   , IPSecLevel
-  , defaultMsg
   , Sizable(..)
   , Key(..)
   , EncAlg(..)
@@ -40,30 +38,36 @@ module Network.Security.Message
   , CompAlg(..)
   , SAState(..)
   , Supported(..)
+  , Packable(..)
   ) where
 
-import qualified Data.ByteString.Lazy as LBS
+import           Control.Monad
+import           Control.Monad (liftM)
+import           Data.Binary
+import           Data.Binary.Get
+import           Data.Binary.Put
+import           Data.Bits
 import qualified Data.ByteString as BS
-import Data.Binary
-import Data.Binary.Get
-import Data.Binary.Put
-import Foreign.C.Types ( CInt, CUInt, CChar, CSize )
-import Control.Monad (liftM)
-import Debug.Trace
-import Data.Bits
-import Control.Monad
-import qualified Control.Monad.State as St
-import Data.Maybe
+import qualified Data.ByteString.Lazy as LBS
+import           Data.Default
+import           Data.Maybe
+import           Data.Monoid ((<>))
+import           Data.Time.Clock (UTCTime)
+import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds, posixSecondsToUTCTime)
+import           Data.Time.Format ()
+import           Foreign.C.Types (CInt, CUInt, CChar, CSize)
+import           Network.Socket (SockAddr(..), packFamily, unpackFamily, Family(..))
+import           Network.Socket.Internal (sizeOfSockAddrByFamily)
 
-import Data.Time.Clock
-import Data.Time.Clock.POSIX
-import Data.Time.Format
-import Network.Socket (SockAddr(..), packFamily, unpackFamily, Family(..))
-import Network.Socket.Internal (sizeOfSockAddrByFamily)
-import Data.Monoid ((<>))
+import Foreign (Storable)
+import           Debug.Trace
 
 class Sizable a where
   sizeOf :: a -> Int
+
+class Packable a where
+  pack :: a -> CInt
+  unpack :: CInt -> Maybe a
 
 data MsgHdr = MsgHdr
   { msgHdrVersion :: Int
@@ -75,12 +79,11 @@ data MsgHdr = MsgHdr
   , msgHdrPid :: Int
   } deriving (Show, Eq)
 
-data Msg = Msg 
+data Msg = Msg
   { msgVersion :: Int
   , msgType :: MsgType
   , msgErrno :: Int
   , msgSatype :: SAType
-  , msgLength :: Int
   , msgSeq :: Int
   , msgPid :: Int
   , msgSA :: Maybe SA
@@ -110,54 +113,55 @@ data Msg = Msg
   , msgKMAddress :: Maybe KMAddress
   } deriving (Show, Eq)
 
-defaultMsg :: Msg
-defaultMsg = Msg { msgVersion = #const PF_KEY_V2
-                 , msgType = MsgTypeReserved
-                 , msgErrno = 0
-                 , msgSatype = SATypeUnspec
-                 , msgLength = 0
-                 , msgSeq = 0
-                 , msgPid = 0
-                 , msgSA = Nothing
-                 , msgLifetimeCurrent = Nothing
-                 , msgLifetimeHard = Nothing
-                 , msgLifetimeSoft = Nothing
-                 , msgAddressSrc = Nothing
-                 , msgAddressDst = Nothing
-                 , msgAddressProxy = Nothing
-                 , msgKeyAuth = Nothing
-                 , msgKeyEncrypt = Nothing
-                 , msgIdentitySrc = Nothing
-                 , msgIdentityDst = Nothing
-                 , msgSensitivity = Nothing
-                 , msgProposal = Nothing
-                 , msgSupportedAuth = Nothing
-                 , msgSupportedEncrypt = Nothing
-                 , msgSPIRange = Nothing
-                 , msgKMPrivate = Nothing
-                 , msgPolicy = Nothing
-                 , msgSA2 = Nothing
-                 , msgNATTType = Nothing
-                 , msgNATTSPort = Nothing
-                 , msgNATTDPort = Nothing
-                 , msgNATTOA = Nothing
-                 , msgSecCtx = Nothing
-                 , msgKMAddress = Nothing
-                 }
+instance Default Msg where
+  def =
+    Msg { msgVersion = #const PF_KEY_V2
+        , msgType = MsgTypeReserved
+        , msgErrno = 0
+        , msgSatype = SATypeUnspec
+        , msgSeq = 0
+        , msgPid = 0
+        , msgSA = Nothing
+        , msgLifetimeCurrent = Nothing
+        , msgLifetimeHard = Nothing
+        , msgLifetimeSoft = Nothing
+        , msgAddressSrc = Nothing
+        , msgAddressDst = Nothing
+        , msgAddressProxy = Nothing
+        , msgKeyAuth = Nothing
+        , msgKeyEncrypt = Nothing
+        , msgIdentitySrc = Nothing
+        , msgIdentityDst = Nothing
+        , msgSensitivity = Nothing
+        , msgProposal = Nothing
+        , msgSupportedAuth = Nothing
+        , msgSupportedEncrypt = Nothing
+        , msgSPIRange = Nothing
+        , msgKMPrivate = Nothing
+        , msgPolicy = Nothing
+        , msgSA2 = Nothing
+        , msgNATTType = Nothing
+        , msgNATTSPort = Nothing
+        , msgNATTDPort = Nothing
+        , msgNATTOA = Nothing
+        , msgSecCtx = Nothing
+        , msgKMAddress = Nothing
+        }
 
 iPSecPortAny :: Int
 iPSecPortAny = #const IPSEC_PORT_ANY
 
-data IPProto = IPProtoAny
-             | IPProtoESP
-             | IPProtoAH
-             | IPProtoIPComp
-             | IPProtoIPIP
-             | IPProtoIPv4
-             | IPProtoICMPv6
-             | IPProtoICMP
-             | IPProtoUnknown Int
-             deriving (Eq)
+data IPProto
+  = IPProtoAny
+  | IPProtoESP
+  | IPProtoAH
+  | IPProtoIPComp
+  | IPProtoIPIP
+  | IPProtoIPv4
+  | IPProtoICMPv6
+  | IPProtoICMP
+  | IPProtoUnknown Int
+  deriving (Eq)
 
 instance Show IPProto where
   show IPProtoAny = "any"
@@ -183,6 +187,10 @@ instance Read IPProto where
     , ("icmp", IPProtoICMP)
     ]
 
+instance Packable IPProto where
+  pack = packIPProto
+  unpack = Just . unpackIPProto
+
 packIPProto :: IPProto -> CInt
 packIPProto p = case p of
   IPProtoAny -> 255
@@ -206,7 +214,6 @@ unpackIPProto p = case p of
   1 -> IPProtoICMP
   v -> IPProtoUnknown $ fromIntegral v
 
-
 repeateL :: (Monad m) => (Int, a) -> ((Int, a) -> m (Int, a)) -> m a
 repeateL (l, a) f = do
   if (l > 0) then do
@@ -218,12 +225,12 @@ instance Sizable Msg where
    sizeOf _ = #{size struct sadb_msg}
 
 instance Binary MsgHdr where
-   put msg@(MsgHdr {..}) = do
+   put (MsgHdr {..}) = do
      putWord8 $ fromIntegral msgHdrVersion
      putWord8 $ fromIntegral $ packMsgType msgHdrType
      putWord8 $ fromIntegral msgHdrErrno
      putWord8 $ fromIntegral $ packSAType msgHdrSatype
-     putWord16le $ fromIntegral $ msgHdrLength
+     putWord16le $ fromIntegral msgHdrLength
      putWord16le 0
      putWord32le $ fromIntegral msgHdrSeq
      putWord32le $ fromIntegral msgHdrPid
@@ -231,12 +238,12 @@ instance Binary MsgHdr where
      msgHdrVersion <- liftM fromIntegral getWord8
      msgHdrType <- liftM (unpackMsgType . fromIntegral) getWord8
      msgHdrErrno <- liftM fromIntegral getWord8
-     msgHdrSatype <- liftM (unpackSAType . fromIntegral) getWord8
-     msgHdrLength <- liftM fromIntegral getWord16le
-     _ <- liftM fromIntegral getWord16le
-     msgHdrSeq <- liftM fromIntegral getWord32le
-     msgHdrPid <- liftM fromIntegral getWord32le
-     return $ MsgHdr {..}
+     join $ flip liftM (liftM (unpackSAType . fromIntegral) getWord8) $ maybe (fail "invalid sa type") $ \msgHdrSatype -> do
+       msgHdrLength <- liftM fromIntegral getWord16le
+       _ <- liftM fromIntegral getWord16le
+       msgHdrSeq <- liftM fromIntegral getWord32le
+       msgHdrPid <- liftM fromIntegral getWord32le
+       return MsgHdr{..}
 
 instance Binary Msg where
    put msg@(Msg{..}) = do
@@ -244,11 +251,11 @@ instance Binary Msg where
      putWord8 $ fromIntegral $ packMsgType msgType
      putWord8 $ fromIntegral msgErrno
      putWord8 $ fromIntegral $ packSAType msgSatype
-     putWord16le $ fromIntegral $ msgLength' msg
+     trace ("msgLengh=" ++ show (msgLength' msg)) $ putWord16le $ fromIntegral $ msgLength' msg
      putWord16le 0
      putWord32le $ fromIntegral msgSeq
      putWord32le $ fromIntegral msgPid
-     let putM a f = maybe (return ()) (put . f) a
+     let putM = (put .) . flip liftM
      putM msgPolicy ExtensionPolicy
      putM msgSA ExtensionSA
      putM msgLifetimeCurrent ExtensionLifetimeCurrent
@@ -276,52 +283,24 @@ instance Binary Msg where
      putM msgKMAddress ExtensionKMAddress
 
    get = do
-     version <- getWord8
+     version <- liftM fromIntegral getWord8
      typ <- getWord8
      errno <- getWord8
-     satype <- getWord8
-     len <- getWord16le
-     _ <- getWord16le
-     seq <- getWord32le
-     pid <- getWord32le
-     let hdr = Msg { msgVersion = fromIntegral version
-                  , msgType = unpackMsgType $ fromIntegral typ
-                  , msgErrno = fromIntegral errno
-                  , msgSatype = unpackSAType $ fromIntegral satype
-                  , msgLength = fromIntegral len
-                  , msgSeq = fromIntegral seq
-                  , msgPid = fromIntegral pid
-                  , msgSA = Nothing
-                  , msgLifetimeCurrent = Nothing
-                  , msgLifetimeHard = Nothing
-                  , msgLifetimeSoft = Nothing
-                  , msgAddressSrc = Nothing
-                  , msgAddressDst = Nothing
-                  , msgAddressProxy = Nothing
-                  , msgKeyAuth = Nothing
-                  , msgKeyEncrypt = Nothing
-                  , msgIdentitySrc = Nothing
-                  , msgIdentityDst = Nothing
-                  , msgSensitivity = Nothing
-                  , msgProposal = Nothing
-                  , msgSupportedAuth = Nothing
-                  , msgSupportedEncrypt = Nothing
-                  , msgSPIRange = Nothing
-                  , msgKMPrivate = Nothing
-                  , msgPolicy = Nothing
-                  , msgSA2 = Nothing
-                  , msgNATTType = Nothing
-                  , msgNATTSPort = Nothing
-                  , msgNATTDPort = Nothing
-                  , msgNATTOA = Nothing
-                  , msgSecCtx = Nothing
-                  , msgKMAddress = Nothing
-                  }
-     let bodylen = fromIntegral (((fromIntegral len) :: Int) * 8 -  #{size struct sadb_msg})
-     if bodylen > 0 then do
-         repeateL (fromIntegral bodylen, hdr) updateMsgCnt'
-       else
-       return hdr
+     join $ flip liftM (liftM (unpackSAType . fromIntegral) getWord8) $ maybe (fail "invalid sa type") $ \satype -> do
+                     len <- getWord16le
+                     _ <- getWord16le
+                     seq <- getWord32le
+                     pid <- getWord32le
+                     let hdr = def
+                               { msgVersion = version
+                               , msgType = unpackMsgType $ fromIntegral typ
+                               , msgErrno = fromIntegral errno
+                               , msgSatype = satype
+                               , msgSeq = fromIntegral seq
+                               , msgPid = fromIntegral pid
+                               }
+                     let bodylen = fromIntegral (((fromIntegral len) :: Int) * 8 -  #{size struct sadb_msg})
+                     if bodylen > 0 then repeateL (fromIntegral bodylen, hdr) updateMsgCnt' else return hdr
 
 updateMsgCnt' :: (Int, Msg) -> Get (Int, Msg)
 updateMsgCnt' (0, msg) = return (0, msg)
@@ -387,36 +366,37 @@ msgLength' Msg{..} = (`shiftR` 3) $ #{size struct sadb_msg}
     , mlen msgSecCtx
     , mlen msgKMAddress
     ]
-    where 
+    where
       mlen :: Sizable a => Maybe a -> Int
       mlen = maybe 0 sizeOf
 
-data MsgType = MsgTypeReserved
-             | MsgTypeGetSPI
-             | MsgTypeUpdate
-             | MsgTypeAdd
-             | MsgTypeDelete
-             | MsgTypeGet
-             | MsgTypeAcquire
-             | MsgTypeRegister           
-             | MsgTypeExpire             
-             | MsgTypeFlush
-             | MsgTypeDump              
-             | MsgTypePromisc
-             | MsgTypePChange
-             | MsgTypeSPDUpdate
-             | MsgTypeSPDAdd           
-             | MsgTypeSPDDelete
-             | MsgTypeSPDGet           
-             | MsgTypeSPDAcquire
-             | MsgTypeSPDDump          
-             | MsgTypeSPDFlush         
-             | MsgTypeSPDSetidx
-             | MsgTypeSPDExpire
-             | MsgTypeSPDDelete2
-             | MsgTypeNATTNewMapping
-             | MsgTypeMigrate          
-             deriving (Show, Eq)
+data MsgType
+  = MsgTypeReserved
+  | MsgTypeGetSPI
+  | MsgTypeUpdate
+  | MsgTypeAdd
+  | MsgTypeDelete
+  | MsgTypeGet
+  | MsgTypeAcquire
+  | MsgTypeRegister
+  | MsgTypeExpire
+  | MsgTypeFlush
+  | MsgTypeDump
+  | MsgTypePromisc
+  | MsgTypePChange
+  | MsgTypeSPDUpdate
+  | MsgTypeSPDAdd
+  | MsgTypeSPDDelete
+  | MsgTypeSPDGet
+  | MsgTypeSPDAcquire
+  | MsgTypeSPDDump
+  | MsgTypeSPDFlush
+  | MsgTypeSPDSetIdx
+  | MsgTypeSPDExpire
+  | MsgTypeSPDDelete2
+  | MsgTypeNATTNewMapping
+  | MsgTypeMigrate
+  deriving (Show, Eq)
 
 packMsgType :: MsgType -> CInt
 packMsgType t = case t of
@@ -427,24 +407,24 @@ packMsgType t = case t of
   MsgTypeDelete -> #const SADB_DELETE
   MsgTypeGet -> #const SADB_GET
   MsgTypeAcquire -> #const SADB_ACQUIRE
-  MsgTypeRegister -> #const SADB_REGISTER           
-  MsgTypeExpire -> #const SADB_EXPIRE             
+  MsgTypeRegister -> #const SADB_REGISTER
+  MsgTypeExpire -> #const SADB_EXPIRE
   MsgTypeFlush -> #const SADB_FLUSH
-  MsgTypeDump -> #const SADB_DUMP              
+  MsgTypeDump -> #const SADB_DUMP
   MsgTypePromisc -> #const SADB_X_PROMISC
   MsgTypePChange -> #const SADB_X_PCHANGE
   MsgTypeSPDUpdate -> #const SADB_X_SPDUPDATE
-  MsgTypeSPDAdd -> #const SADB_X_SPDADD           
+  MsgTypeSPDAdd -> #const SADB_X_SPDADD
   MsgTypeSPDDelete -> #const SADB_X_SPDDELETE
-  MsgTypeSPDGet -> #const SADB_X_SPDGET          
+  MsgTypeSPDGet -> #const SADB_X_SPDGET
   MsgTypeSPDAcquire -> #const SADB_X_SPDACQUIRE
-  MsgTypeSPDDump -> #const SADB_X_SPDDUMP          
-  MsgTypeSPDFlush -> #const SADB_X_SPDFLUSH         
-  MsgTypeSPDSetidx -> #const SADB_X_SPDSETIDX
+  MsgTypeSPDDump -> #const SADB_X_SPDDUMP
+  MsgTypeSPDFlush -> #const SADB_X_SPDFLUSH
+  MsgTypeSPDSetIdx -> #const SADB_X_SPDSETIDX
   MsgTypeSPDExpire -> #const SADB_X_SPDEXPIRE
   MsgTypeSPDDelete2 -> #const SADB_X_SPDDELETE2
   MsgTypeNATTNewMapping -> #const SADB_X_NAT_T_NEW_MAPPING
-  MsgTypeMigrate -> #const SADB_X_MIGRATE          
+  MsgTypeMigrate -> #const SADB_X_MIGRATE
 
 unpackMsgType :: CInt -> MsgType
 unpackMsgType t = case t of
@@ -468,23 +448,24 @@ unpackMsgType t = case t of
   (#const SADB_X_SPDACQUIRE) -> MsgTypeSPDAcquire
   (#const SADB_X_SPDDUMP) -> MsgTypeSPDDump
   (#const SADB_X_SPDFLUSH) -> MsgTypeSPDFlush
-  (#const SADB_X_SPDSETIDX) -> MsgTypeSPDSetidx
+  (#const SADB_X_SPDSETIDX) -> MsgTypeSPDSetIdx
   (#const SADB_X_SPDEXPIRE) -> MsgTypeSPDExpire
   (#const SADB_X_SPDDELETE2) -> MsgTypeSPDDelete2
   (#const SADB_X_NAT_T_NEW_MAPPING) -> MsgTypeNATTNewMapping
   (#const SADB_X_MIGRATE) -> MsgTypeMigrate
-  _ -> error $ "unknown type: " ++ show t 
+  _ -> error $ "unknown type: " ++ show t
 
-data SAType = SATypeUnspec
-            | SATypeUnspec1 
-            | SATypeAH
-            | SATypeESP
-            | SATypeRSVP
-            | SATypeOSPFv2
-            | SATypeRIPv2
-            | SATypeMIP
-            | SATypeIPComp
-            deriving (Eq)
+data SAType
+  = SATypeUnspec
+  | SATypeUnspec1
+  | SATypeAH
+  | SATypeESP
+  | SATypeRSVP
+  | SATypeOSPFv2
+  | SATypeRIPv2
+  | SATypeMIP
+  | SATypeIPComp
+  deriving (Eq)
 
 instance Show SAType where
   show SATypeUnspec = "unspec"
@@ -496,6 +477,10 @@ instance Show SAType where
   show SATypeRIPv2 = "ripv2"
   show SATypeMIP = "mip"
   show SATypeIPComp = "ipcomp"
+
+instance Packable SAType where
+  pack = packSAType
+  unpack = unpackSAType
 
 packSAType :: SAType -> CInt
 packSAType t = case t of
@@ -509,17 +494,18 @@ packSAType t = case t of
   SATypeMIP -> #const SADB_SATYPE_MIP
   SATypeIPComp -> #const SADB_X_SATYPE_IPCOMP
 
-unpackSAType :: CInt -> SAType
+unpackSAType :: CInt -> Maybe SAType
 unpackSAType t = case t of
-  (#const SADB_SATYPE_UNSPEC) -> SATypeUnspec
-  1 -> SATypeUnspec1
-  (#const SADB_SATYPE_AH) -> SATypeAH
-  (#const SADB_SATYPE_ESP) -> SATypeESP
-  (#const SADB_SATYPE_RSVP) -> SATypeRSVP
-  (#const SADB_SATYPE_OSPFV2) -> SATypeOSPFv2
-  (#const SADB_SATYPE_RIPV2) -> SATypeRIPv2
-  (#const SADB_SATYPE_MIP) -> SATypeMIP
-  (#const SADB_X_SATYPE_IPCOMP) -> SATypeIPComp
+  (#const SADB_SATYPE_UNSPEC) -> Just SATypeUnspec
+  1 -> Just SATypeUnspec1
+  (#const SADB_SATYPE_AH) -> Just SATypeAH
+  (#const SADB_SATYPE_ESP) -> Just SATypeESP
+  (#const SADB_SATYPE_RSVP) -> Just SATypeRSVP
+  (#const SADB_SATYPE_OSPFV2) -> Just SATypeOSPFv2
+  (#const SADB_SATYPE_RIPV2) -> Just SATypeRIPv2
+  (#const SADB_SATYPE_MIP) -> Just SATypeMIP
+  (#const SADB_X_SATYPE_IPCOMP) -> Just SATypeIPComp
+  _ -> Nothing
 
 instance Read SAType where
   readsPrec _ =
@@ -534,24 +520,6 @@ instance Read SAType where
       , ("mip", SATypeMIP)
       , ("ipcomp", SATypeIPComp)
       ]
-
-data ExtHdr = ExtHdr { exthdrLen :: Int
-                     , exthdrType :: Int
-                     } deriving (Show, Eq)
-
-instance Sizable ExtHdr where
-   sizeOf _ = #{size struct sadb_ext}  
-
-instance Binary ExtHdr where
-  put (ExtHdr len typ) = do
-    putWord16le $ fromIntegral len
-    putWord16le $ fromIntegral typ
-  get = do
-    len <- getWord16le
-    typ <- getWord16le
-    return $ ExtHdr { exthdrLen = fromIntegral len
-                    , exthdrType = fromIntegral typ
-                    }
 
 data Extension
   = ExtensionUnknown BS.ByteString
@@ -587,10 +555,12 @@ putAddr (Address proto prefixlen addr) = do
     putWord8 $ fromIntegral prefixlen
     putWord16le 0
     put addr
-putKey (Key bits blob) = do
+putKey k@(Key bits blob) = do
     putWord16le $ fromIntegral bits
     putWord16le 0
     putByteString blob
+    let padlen = if bits .&. 0x3f /= 0 then 8 - (bits `shiftR` 3) .&. 7 else 0
+    replicateM_ padlen (putWord8 0)
 putPolicy (Policy typ dir id prio reqs) = do
     putWord16le $ fromIntegral $ packIPSecPolicy typ
     putWord8 $ fromIntegral $ packIPSecDir dir
@@ -727,30 +697,6 @@ instance Binary Extension where
         addressPrefixLen <- liftM fromIntegral getWord8
         _ <- getWord16le
         addressAddr <- get
-{-        
-        family <- getWord16le >>= return . unpackFamily . fromIntegral
-        let left = len - #{size struct sadb_address}
-        let addrSize = sizeOfSockAddrByFamily family
-        if (left /= addrSize) then error "invalid addr"
-          else do
-          addr <- case family of
-            AF_INET6 -> do
-              port <- getWord16le
-              flowinfo <- getWord32be
-              ha0 <- getWord32be 
-              ha1 <- getWord32be
-              ha2 <- getWord32be
-              ha3 <- getWord32be
-              scopeid <- getWord32le
-              _ <- getByteString $ left - 22
-              return $ SockAddrInet6 (fromIntegral port) flowinfo (ha0, ha1, ha2, ha3) scopeid
-            AF_INET -> do
-              port <- getWord16le
-              inet <- getWord32le
-              _ <- getByteString $ left - 8
-              return $ SockAddrInet (fromIntegral port) inet
-            _ -> error "unsupported family"
--}
         return Address{..}
 
       getKey = do
@@ -796,13 +742,14 @@ instance Binary Extension where
       (#const SADB_X_EXT_SEC_CTX) -> liftM ExtensionSecCtx get
       (#const SADB_X_EXT_KMADDRESS) -> liftM ExtensionKMAddress get
 
-data SAState = SAStateLarval 
-             | SAStateMature
-             | SAStateDying
-             | SAStateDead
-               deriving (Eq)
+data SAState
+  = SAStateLarval
+  | SAStateMature
+  | SAStateDying
+  | SAStateDead
+  deriving (Eq)
 
-instance Show SAState where 
+instance Show SAState where
   show SAStateLarval = "larval"
   show SAStateMature = "mature"
   show SAStateDying = "dying"
@@ -822,13 +769,14 @@ unpackSAState t = case t of
   (#const SADB_SASTATE_DYING) -> SAStateDying
   (#const SADB_SASTATE_DEAD) -> SAStateDead
 
-data SA = SA { saSPI :: Int
-             , saReplay :: Int
-             , saState :: SAState
-             , saAuth :: AuthAlg
-             , saEncrypt :: EncAlg
-             , saFlags :: Int 
-             } deriving (Show, Eq)
+data SA = SA
+  { saSPI :: Int
+  , saReplay :: Int
+  , saState :: SAState
+  , saAuth :: AuthAlg
+  , saEncrypt :: EncAlg
+  , saFlags :: Int
+  } deriving (Show, Eq)
 
 instance Sizable SA where
    sizeOf _ = #{size struct sadb_sa}
@@ -842,28 +790,23 @@ instance Binary SA where
     putWord8 $ fromIntegral $ packEncAlg encrypt
     putWord32le $ fromIntegral flags
   get = do
-    spi <- getWord32be
-    replay <- getWord8
-    state <- getWord8
-    auth <- getWord8
-    encrypt <- getWord8
-    flags <- getWord32le
-    return $ SA { saSPI = fromIntegral spi
-                , saReplay = fromIntegral replay
-                , saState = unpackSAState $ fromIntegral state
-                , saAuth = unpackAuthAlg $ fromIntegral auth
-                , saEncrypt = unpackEncAlg $ fromIntegral encrypt
-                , saFlags = fromIntegral flags
-                }
+    saSPI <- liftM fromIntegral getWord32be
+    saReplay <- liftM fromIntegral getWord8
+    saState <- liftM (unpackSAState . fromIntegral) getWord8
+    saAuth <- liftM (unpackAuthAlg . fromIntegral) getWord8
+    saEncrypt <- liftM (unpackEncAlg . fromIntegral) getWord8
+    saFlags <- liftM fromIntegral getWord32le
+    return SA{..}
 
-data Lifetime = Lifetime { ltAllocations :: Int
-                         , ltBytes :: Int
-                         , ltAddTime :: UTCTime
-                         , ltUseTime :: UTCTime
-                         } deriving (Show, Eq)
-                
+data Lifetime = Lifetime
+  { ltAllocations :: Int
+  , ltBytes :: Int
+  , ltAddTime :: UTCTime
+  , ltUseTime :: UTCTime
+  } deriving (Show, Eq)
+
 instance Sizable Lifetime where
-   sizeOf _ = #{size struct sadb_lifetime}  
+   sizeOf _ = #{size struct sadb_lifetime}
 
 instance Binary Lifetime where
   put (Lifetime allocations bytes addtime usetime) = do
@@ -872,20 +815,17 @@ instance Binary Lifetime where
     putWord64le $ fromIntegral $ fromEnum $ utcTimeToPOSIXSeconds addtime
     putWord64le $ fromIntegral $ fromEnum $ utcTimeToPOSIXSeconds usetime
   get = do
-    allocations <- getWord32le
-    bytes <- getWord64le
-    addtime <- getWord64le
-    usetime <- getWord64le
-    return $ Lifetime { ltAllocations = fromIntegral allocations
-                                     , ltBytes = fromIntegral bytes
-                                     , ltAddTime = posixSecondsToUTCTime $ fromIntegral addtime
-                                     , ltUseTime = posixSecondsToUTCTime $ fromIntegral usetime
-                                     }
+    ltAllocations <- liftM fromIntegral getWord32le
+    ltBytes <- liftM fromIntegral getWord64le
+    ltAddTime <- liftM (posixSecondsToUTCTime . fromIntegral) getWord64le
+    ltUseTime <- liftM (posixSecondsToUTCTime . fromIntegral) getWord64le
+    return Lifetime{..}
 
-data Address = Address { addressProto :: Int
-                       , addressPrefixLen :: Int
-                       , addressAddr :: SockAddr
-                       } deriving (Show, Eq)
+data Address = Address
+  { addressProto :: Int
+  , addressPrefixLen :: Int
+  , addressAddr :: SockAddr
+  } deriving (Show, Eq)
 
 instance Sizable Address where
    sizeOf (Address _ _ addr) = #{size struct sadb_address} + sizeOf addr
@@ -937,44 +877,45 @@ instance Binary SockAddr where
       _ -> error $ "unsupported family:" ++ show family
     return addr
 
-data Key = Key { keyBits :: Int
-               , keyData :: BS.ByteString
-               } deriving (Show, Eq)
+data Key = Key
+  { keyBits :: Int
+  , keyData :: BS.ByteString
+  } deriving (Show, Eq)
 
 instance Sizable Key where
-   sizeOf _ = #{size struct sadb_key}  
+   sizeOf (Key bits _) = #{size struct sadb_key} + if bits .&. 0x3f /= 0 then 1 + (bits `shiftR` 3) .|. 7 else (bits `shiftR` 3)
 
-data Identity = Identity { identType :: Int
-                         , identId :: Int
-                         } deriving (Show, Eq)
+data Identity = Identity
+  { identType :: IdentType
+  , identId :: Int
+  } deriving (Show, Eq)
 
 instance Sizable Identity where
-   sizeOf _ = #{size struct sadb_ident}  
+   sizeOf _ = #{size struct sadb_ident}
 
 instance Binary Identity where
   put (Identity typ id) = do
-    putWord16le $ fromIntegral typ
+    putWord16le $ fromIntegral $ packIdentType typ
     putWord16le 0
     putWord64le $ fromIntegral id
   get = do
-    typ <- getWord16le
+    identType <- liftM (unpackIdentType . fromIntegral) getWord16le
     _ <- getWord16le
-    id <- getWord64le
-    return $ Identity { identType = fromIntegral typ
-                      , identId = fromIntegral id
-                      }
-  
-data Sensitivity = Sensitivity { sensDpd :: Int
-                               , sensLevel :: Int
-                               , sensLen :: Int
-                               , sensIntegLevel :: Int
-                               , sensIntegLen :: Int
-                               , sensBitmap :: Int
-                               , sensIntegBitmap :: Int
-                               } deriving (Show, Eq)
+    identId <- liftM fromIntegral getWord64le
+    return Identity{..}
+
+data Sensitivity = Sensitivity
+  { sensDpd :: Int
+  , sensLevel :: Int
+  , sensLen :: Int
+  , sensIntegLevel :: Int
+  , sensIntegLen :: Int
+  , sensBitmap :: [Int]
+  , sensIntegBitmap :: [Int]
+  } deriving (Show, Eq)
 
 instance Sizable Sensitivity where
-   sizeOf _ = #{size struct sadb_sens}  
+   sizeOf (Sensitivity{..}) = #{size struct sadb_sens} + 8 * sensLen + 8 * sensIntegLen
 
 instance Binary Sensitivity where
   put (Sensitivity dpd level len integLevel integLen bitmap integBitmap) = do
@@ -984,28 +925,26 @@ instance Binary Sensitivity where
     putWord8 $ fromIntegral integLevel
     putWord8 $ fromIntegral integLen
     putWord32le 0
+    mapM_ (putWord64le . fromIntegral) bitmap
+    mapM_ (putWord64le . fromIntegral) integBitmap
   get = do
-    dpd <- getWord32le
-    level <- getWord8
-    len <- getWord8
-    integLevel <- getWord8
-    integLen <- getWord8
+    sensDpd <- liftM fromIntegral getWord32le
+    sensLevel <- liftM fromIntegral getWord8
+    sensLen <- liftM fromIntegral getWord8
+    sensIntegLevel <- liftM fromIntegral getWord8
+    sensIntegLen <- liftM fromIntegral getWord8
     _ <- getWord32le
-    return $ Sensitivity { sensDpd = fromIntegral dpd
-                         , sensLevel = fromIntegral level
-                         , sensLen = fromIntegral len
-                         , sensIntegLevel = fromIntegral integLevel
-                         , sensIntegLen = fromIntegral integLen
-                         , sensBitmap = 0
-                         , sensIntegBitmap = 0
-                         }
+    sensBitmap <- readArray (8 * sensLen) (liftM fromIntegral getWord64le)
+    sensIntegBitmap <- readArray (8 * sensIntegLen) (liftM fromIntegral getWord64le)
+    return Sensitivity{..}
 
-data Proposal = Proposal { propReplay :: Int
-                         , propCombs :: [Combs]
-                         } deriving (Show, Eq)
+data Proposal = Proposal
+  { propReplay :: Int
+  , propCombs :: [Combs]
+  } deriving (Show, Eq)
 
 instance Sizable Proposal where
-   sizeOf _ = #{size struct sadb_prop}  
+   sizeOf _ = #{size struct sadb_prop}
 
 instance Binary Proposal where
   put (Proposal replay combs) = do
@@ -1014,50 +953,46 @@ instance Binary Proposal where
     putWord8 0
     putWord8 0
   get = do
-    replay <- getWord8
+    propReplay <- liftM fromIntegral getWord8
     _ <- getWord8
     _ <- getWord8
     _ <- getWord8
-    return $ Proposal { propReplay = fromIntegral replay
-                      , propCombs = []
-                      }
+    let propCombs = []
+    return Proposal{..}
 
-data Combs = Combs { combAuth :: Int
-                   , combEncrypt :: Int
-                   , combFlags :: Int
-                   , combAuthMinBits :: Int
-                   , combAuthMaxBits :: Int
-                   , combEncryptMinBits :: Int
-                   , combEncryptMaxBits :: Int
-                   , combSoftAllocations :: Int
-                   , combHardAllocations :: Int
-                   , combSoftBytes :: Int
-                   , combHardBytes :: Int
-                   , combSoftAddTime :: Int
-                   , combHardAddTime :: Int
-                   , combSoftUseTime :: Int
-                   , combHardUseTime :: Int
-                   } deriving (Show, Eq)
+data Combs = Combs
+  { combAuth :: Int
+  , combEncrypt :: Int
+  , combFlags :: Int
+  , combAuthMinBits :: Int
+  , combAuthMaxBits :: Int
+  , combEncryptMinBits :: Int
+  , combEncryptMaxBits :: Int
+  , combSoftAllocations :: Int
+  , combHardAllocations :: Int
+  , combSoftBytes :: Int
+  , combHardBytes :: Int
+  , combSoftAddTime :: Int
+  , combHardAddTime :: Int
+  , combSoftUseTime :: Int
+  , combHardUseTime :: Int
+  } deriving (Show, Eq)
 
-data Supported = Supported { supportedAlgs :: [Alg] } deriving (Show, Eq)
+instance Sizable Combs where
+   sizeOf _ = #{size struct sadb_comb}
+
+data Supported = Supported
+  { supportedAlgs :: [Alg] } deriving (Show, Eq)
 
 instance Sizable Supported where
    sizeOf _ = #{size struct sadb_supported}
 
-{-
-instance Binary Supported where
-  put (Supported algs) = do
-    putWord32le 0
-  get = do
-    _ <- getWord32le
-    return $ Supported { supportedAlgs = [] }
--}
-
-data Alg = Alg { algId :: Int
-               , algIvLen :: Int
-               , algMinBits :: Int
-               , algMaxBits :: Int
-               } deriving (Show, Eq)
+data Alg = Alg
+  { algId :: Int
+  , algIvLen :: Int
+  , algMinBits :: Int
+  , algMaxBits :: Int
+  } deriving (Show, Eq)
 
 instance Binary Alg where
   put (Alg{..}) = do
@@ -1074,12 +1009,13 @@ instance Binary Alg where
     _ <- getWord16le
     return Alg{..}
 
-data SPIRange = SPIRange { spirangeMin :: Int
-                         , spirangeMax :: Int
-                         } deriving (Show, Eq)
+data SPIRange = SPIRange
+  { spirMin :: Int
+  , spirMax :: Int
+  } deriving (Show, Eq)
 
 instance Sizable SPIRange where
-   sizeOf _ = #{size struct sadb_spirange}  
+   sizeOf _ = #{size struct sadb_spirange}
 
 instance Binary SPIRange where
   put (SPIRange min max) = do
@@ -1087,17 +1023,15 @@ instance Binary SPIRange where
     putWord32le $ fromIntegral max
     putWord32le 0
   get = do
-    min <- getWord32le
-    max <- getWord32le
+    spirMin <- liftM fromIntegral getWord32le
+    spirMax <- liftM fromIntegral getWord32le
     _ <- getWord32le
-    return $ SPIRange { spirangeMin = fromIntegral min
-                      , spirangeMax = fromIntegral max
-                      }
+    return SPIRange{..}
 
 data KMPrivate = KMPrivate deriving (Show, Eq)
 
 instance Sizable KMPrivate where
-   sizeOf _ = #{size struct sadb_x_kmprivate}  
+   sizeOf _ = #{size struct sadb_x_kmprivate}
 
 instance Binary KMPrivate where
   put _ = do
@@ -1106,13 +1040,14 @@ instance Binary KMPrivate where
     _ <- getWord32le
     return KMPrivate
 
-data SA2 = SA2 { sa2Mode :: IPSecMode
-               , sa2Sequence :: Int
-               , sa2ReqId :: Int
-               } deriving (Show, Eq)
+data SA2 = SA2
+  { sa2Mode :: IPSecMode
+  , sa2Sequence :: Int
+  , sa2ReqId :: Int
+  } deriving (Show, Eq)
 
 instance Sizable SA2 where
-   sizeOf _ = #{size struct sadb_x_sa2}  
+   sizeOf _ = #{size struct sadb_x_sa2}
 
 instance Binary SA2 where
   put (SA2 mode seq reqid) = do
@@ -1122,31 +1057,27 @@ instance Binary SA2 where
     putWord32le $ fromIntegral seq
     putWord32le $ fromIntegral reqid
   get = do
-    mode <- getWord8 >>= return . unpackIPSecMode . fromIntegral
+    sa2Mode <- liftM (unpackIPSecMode . fromIntegral) getWord8
     _ <- getWord8
     _ <- getWord16le
-    seq <- getWord32le
-    reqid <- getWord32le
-    return $ SA2 { sa2Mode = mode
-                 , sa2Sequence = fromIntegral seq
-                 , sa2ReqId = fromIntegral reqid
-                 }
+    sa2Sequence <- liftM fromIntegral getWord32le
+    sa2ReqId <- liftM fromIntegral getWord32le
+    return SA2{..}
 
-
-data Policy = Policy { policyType :: IPSecPolicy
-                     , policyDir :: IPSecDir
-                     , policyId :: Int
-                     , policyPriority :: Int
---                     , policyData :: LBS.ByteString
-                     , policyIPSecRequests :: [IPSecRequest]
-                     } deriving (Show, Eq)
+data Policy = Policy
+  { policyType :: IPSecPolicy
+  , policyDir :: IPSecDir
+  , policyId :: Int
+  , policyPriority :: Int
+  , policyIPSecRequests :: [IPSecRequest]
+  } deriving (Show, Eq)
 
 instance Sizable Policy where
    sizeOf p = #{size struct sadb_x_policy} + sum (fmap sizeOf (policyIPSecRequests p))
 
 readArray :: Int -> Get a -> Get [a]
 readArray left f = do
-  if (left == 0) then return [] 
+  if (left <= 0) then return []
     else do
     off <- bytesRead >>= return . fromIntegral
     a <- f
@@ -1154,13 +1085,13 @@ readArray left f = do
     as <- (readArray (left + off - off') f)
     return $ a : as
 
-data IPSecRequest = IPSecRequest { ipsecreqProto :: IPProto
-                                 , ipsecreqMode :: IPSecMode
-                                 , ipsecreqLevel :: IPSecLevel
-                                 , ipsecreqReqId :: Int
-                                 , ipsecreqAddrs :: Maybe (SockAddr, SockAddr)
-                                 } deriving (Show, Eq)
-
+data IPSecRequest = IPSecRequest
+  { ipsecreqProto :: IPProto
+  , ipsecreqMode :: IPSecMode
+  , ipsecreqLevel :: IPSecLevel
+  , ipsecreqReqId :: Int
+  , ipsecreqAddrs :: Maybe (SockAddr, SockAddr)
+  } deriving (Show, Eq)
 
 instance Sizable IPSecRequest where
   sizeOf (IPSecRequest proto mode level reqid Nothing) =  #{size struct sadb_x_ipsecrequest}
@@ -1201,11 +1132,12 @@ instance Binary IPSecRequest where
                return $ Just (addr1, addr2)
     return IPSecRequest{..}
 
-data IPSecMode = IPSecModeAny
-               | IPSecModeTransport
-               | IPSecModeTunnel
-               | IPSecModeBeet
-               deriving (Eq)
+data IPSecMode
+  = IPSecModeAny
+  | IPSecModeTransport
+  | IPSecModeTunnel
+  | IPSecModeBeet
+  deriving (Eq)
 
 instance Show IPSecMode where 
   show IPSecModeAny = "any"
@@ -1235,23 +1167,24 @@ unpackIPSecMode t = case t of
   (#const IPSEC_MODE_TRANSPORT) -> IPSecModeTransport
   (#const IPSEC_MODE_TUNNEL) -> IPSecModeTunnel
   (#const IPSEC_MODE_BEET) -> IPSecModeBeet
-  
-data IPSecDir = IPSecDirAny
-              | IPSecDirInbound
-              | IPSecDirOutbound
-              | IPSecDirForward
-              | IPSecDirMax
-              | IPSecDirInvalid
-              deriving (Eq)
 
-instance Show IPSecDir where 
+data IPSecDir
+  = IPSecDirAny
+  | IPSecDirInbound
+  | IPSecDirOutbound
+  | IPSecDirForward
+  | IPSecDirMax
+  | IPSecDirInvalid
+  deriving (Eq)
+
+instance Show IPSecDir where
   show IPSecDirAny = "any"
   show IPSecDirInbound = "in"
   show IPSecDirOutbound = "out"
   show IPSecDirForward = "fwd"
   show IPSecDirMax = "max"
   show IPSecDirInvalid = "invalid"
-  
+
 instance Read IPSecDir where
   readsPrec _ = 
     tryParse
@@ -1263,12 +1196,12 @@ instance Read IPSecDir where
     , ("invalid", IPSecDirInvalid)
     ]
 
-tryParse [] _ = [] 
+tryParse [] _ = []
 tryParse ((attempt, result):xs) value =
   if (take (length attempt) value) == attempt
   then [(result, drop (length attempt) value)]
   else tryParse xs value
-  
+
 packIPSecDir :: IPSecDir -> CInt
 packIPSecDir t = case t of
   IPSecDirAny -> #const IPSEC_DIR_ANY
@@ -1277,7 +1210,7 @@ packIPSecDir t = case t of
   IPSecDirForward -> #const IPSEC_DIR_FWD
   IPSecDirMax -> #const IPSEC_DIR_MAX
   IPSecDirInvalid -> #const IPSEC_DIR_INVALID
-  
+
 unpackIPSecDir :: CInt -> IPSecDir
 unpackIPSecDir t = case t of
   (#const IPSEC_DIR_ANY) -> IPSecDirAny
@@ -1287,12 +1220,13 @@ unpackIPSecDir t = case t of
   (#const IPSEC_DIR_MAX) -> IPSecDirMax
   (#const IPSEC_DIR_INVALID) -> IPSecDirInvalid
 
-data IPSecPolicy = IPSecPolicyDiscard
-                 | IPSecPolicyNone
-                 | IPSecPolicyIPSec
-                 | IPSecPolicyEntrust
-                 | IPSecPolicyBypass
-                 deriving (Eq)
+data IPSecPolicy
+  = IPSecPolicyDiscard
+  | IPSecPolicyNone
+  | IPSecPolicyIPSec
+  | IPSecPolicyEntrust
+  | IPSecPolicyBypass
+  deriving (Eq)
 
 instance Show IPSecPolicy where
   show IPSecPolicyDiscard = "discard"
@@ -1300,9 +1234,9 @@ instance Show IPSecPolicy where
   show IPSecPolicyIPSec = "ipsec"
   show IPSecPolicyEntrust = "entrust"
   show IPSecPolicyBypass = "bypass"
-  
+
 instance Read IPSecPolicy where
-  readsPrec _ = 
+  readsPrec _ =
     tryParse
     [ ("discard", IPSecPolicyDiscard)
     , ("none", IPSecPolicyNone)
@@ -1318,7 +1252,7 @@ packIPSecPolicy t = case t of
   IPSecPolicyIPSec -> #const IPSEC_POLICY_IPSEC
   IPSecPolicyEntrust -> #const IPSEC_POLICY_ENTRUST
   IPSecPolicyBypass -> #const IPSEC_POLICY_BYPASS
-  
+
 unpackIPSecPolicy :: CInt -> IPSecPolicy
 unpackIPSecPolicy t = case t of
   (#const IPSEC_POLICY_DISCARD) -> IPSecPolicyDiscard
@@ -1327,11 +1261,12 @@ unpackIPSecPolicy t = case t of
   (#const IPSEC_POLICY_ENTRUST) -> IPSecPolicyEntrust
   (#const IPSEC_POLICY_BYPASS) -> IPSecPolicyBypass
 
-data IPSecLevel = IPSecLevelDefault
-                | IPSecLevelUse
-                | IPSecLevelRequire
-                | IPSecLevelUnique
-                deriving (Eq)
+data IPSecLevel
+  = IPSecLevelDefault
+  | IPSecLevelUse
+  | IPSecLevelRequire
+  | IPSecLevelUnique
+  deriving (Eq)
 
 instance Show IPSecLevel where
   show IPSecLevelDefault = "default"
@@ -1354,7 +1289,7 @@ packIPSecLevel t = case t of
   IPSecLevelUse -> #const IPSEC_LEVEL_USE
   IPSecLevelRequire -> #const IPSEC_LEVEL_REQUIRE
   IPSecLevelUnique -> #const IPSEC_LEVEL_UNIQUE
-  
+
 unpackIPSecLevel :: CInt -> IPSecLevel
 unpackIPSecLevel t = case t of
   (#const IPSEC_LEVEL_DEFAULT) -> IPSecLevelDefault
@@ -1362,10 +1297,12 @@ unpackIPSecLevel t = case t of
   (#const IPSEC_LEVEL_REQUIRE) -> IPSecLevelRequire
   (#const IPSEC_LEVEL_UNIQUE) -> IPSecLevelUnique
 
-data NATTType = NATTType { natttypeType :: Int } deriving (Show, Eq)
+data NATTType = NATTType
+  { natttype :: Int
+  } deriving (Show, Eq)
 
 instance Sizable NATTType where
-   sizeOf _ = #{size struct sadb_x_nat_t_type}  
+   sizeOf _ = #{size struct sadb_x_nat_t_type}
 
 instance Binary NATTType where
   put (NATTType typ) = do
@@ -1374,35 +1311,36 @@ instance Binary NATTType where
     putWord8 0
     putWord8 0
   get = do
-    typ <- getWord8
+    natttype <- liftM fromIntegral getWord8
     _ <- getWord8
     _ <- getWord8
     _ <- getWord8
-    return $ NATTType { natttypeType = fromIntegral typ
-                    }
+    return NATTType{..}
 
-data NATTPort = NATTPort { nattportPort :: Int } deriving (Show, Eq)
+data NATTPort = NATTPort
+  { nattport :: Int
+  } deriving (Show, Eq)
 
 instance Sizable NATTPort where
-   sizeOf _ = #{size struct sadb_x_nat_t_port}  
+   sizeOf _ = #{size struct sadb_x_nat_t_port}
 
 instance Binary NATTPort where
   put (NATTPort port) = do
     putWord16be $ fromIntegral port
     putWord16le 0
   get = do
-    port <- getWord16be
+    nattport <- liftM fromIntegral getWord16be
     _ <- getWord16le
-    return $ NATTPort { nattportPort = fromIntegral port
-                      }
+    return NATTPort{..}
 
-data SecCtx = SecCtx { ctxAlg :: Int
-                     , ctxDoi :: Int
-                     , ctxLen :: Int
-                     } deriving (Show, Eq)
+data SecCtx = SecCtx
+  { ctxAlg :: Int
+  , ctxDoi :: Int
+  , ctxLen :: Int
+  } deriving (Show, Eq)
 
 instance Sizable SecCtx where
-   sizeOf _ = #{size struct sadb_x_sec_ctx}  
+   sizeOf _ = #{size struct sadb_x_sec_ctx}
 
 instance Binary SecCtx where
   put (SecCtx alg doi len) = do
@@ -1410,18 +1348,15 @@ instance Binary SecCtx where
     putWord8 $ fromIntegral doi
     putWord16le $ fromIntegral len
   get = do
-    alg <- getWord8    
-    doi <- getWord8
-    len <- getWord16le
-    return $ SecCtx { ctxAlg = fromIntegral alg
-                    , ctxDoi = fromIntegral doi
-                    , ctxLen = fromIntegral len
-                    }
+    ctxAlg <- liftM fromIntegral getWord8
+    ctxDoi <- liftM fromIntegral getWord8
+    ctxLen <- liftM fromIntegral getWord16le
+    return SecCtx{..}
 
 data KMAddress = KMAddress deriving (Show, Eq)
 
 instance Sizable KMAddress where
-   sizeOf _ = #{size struct sadb_x_kmaddress}  
+   sizeOf _ = #{size struct sadb_x_kmaddress}
 
 instance Binary KMAddress where
   put _ = do
@@ -1430,16 +1365,17 @@ instance Binary KMAddress where
     _ <- getWord32le
     return KMAddress
 
-data AuthAlg = AuthAlgNone
-             | AuthAlgMD5HMAC
-             | AuthAlgSHA1HMAC
-             | AuthAlgSHA2_256HMAC
-             | AuthAlgSHA2_384HMAC
-             | AuthAlgSHA2_512HMAC
-             | AuthAlgRIPEMD160HMAC
-             | AuthAlgAES_XCBC_MAC
-             | AuthAlgNull
-             deriving (Eq)
+data AuthAlg
+  = AuthAlgNone
+  | AuthAlgMD5HMAC
+  | AuthAlgSHA1HMAC
+  | AuthAlgSHA2_256HMAC
+  | AuthAlgSHA2_384HMAC
+  | AuthAlgSHA2_512HMAC
+  | AuthAlgRIPEMD160HMAC
+  | AuthAlgAES_XCBC_MAC
+  | AuthAlgNull
+  deriving (Eq)
 
 instance Show AuthAlg where
   show AuthAlgNone = "none"
@@ -1490,25 +1426,26 @@ instance Read AuthAlg where
       , ("null", AuthAlgNull)
       ]
 
-data EncAlg = EncAlgNone
-            | EncAlgDES_CBC
-            | EncAlg3DES_CBC
-            | EncAlgCAST_CBC
-            | EncAlgBLOWFISH_CBC
-            | EncAlgNull
-            | EncAlgAES_CBC
-            | EncAlgAES_CTR
-            | EncAlgAES_CCM_ICV8
-            | EncAlgAES_CCM_ICV12
-            | EncAlgAES_CCM_ICV16
-            | EncAlgAES_GCM_ICV8
-            | EncAlgAES_GCM_ICV12
-            | EncAlgAES_GCM_ICV16
-            | EncAlgCamelliaCBC
-            | EncAlgNullAES_GMAC
-            | EncAlgSerpentCBC
-            | EncAlgTwofishCBC
-            deriving (Eq)
+data EncAlg
+  = EncAlgNone
+  | EncAlgDES_CBC
+  | EncAlg3DES_CBC
+  | EncAlgCAST_CBC
+  | EncAlgBLOWFISH_CBC
+  | EncAlgNull
+  | EncAlgAES_CBC
+  | EncAlgAES_CTR
+  | EncAlgAES_CCM_ICV8
+  | EncAlgAES_CCM_ICV12
+  | EncAlgAES_CCM_ICV16
+  | EncAlgAES_GCM_ICV8
+  | EncAlgAES_GCM_ICV12
+  | EncAlgAES_GCM_ICV16
+  | EncAlgCamelliaCBC
+  | EncAlgNullAES_GMAC
+  | EncAlgSerpentCBC
+  | EncAlgTwofishCBC
+  deriving (Eq)
 
 instance Show EncAlg where
   show EncAlgNone = "none"
@@ -1595,36 +1532,47 @@ instance Read EncAlg where
       , ("twofish-cbc", EncAlgTwofishCBC)
     ]
 
-data CompAlg = CompAlgNone
-             | CompAlgOUI
-             | CompAlgDeflate
-             | CompAlgLZS
-             | CompAlgLZJH
-             deriving (Show, Eq)
+data CompAlg
+  = CompAlgNone
+  | CompAlgOUI
+  | CompAlgDeflate
+  | CompAlgLZS
+  | CompAlgLZJH
+  deriving (Show, Eq)
 
-{-
-/* Compression algorithms */
-#define SADB_X_CALG_NONE                0
-#define SADB_X_CALG_OUI                 1
-#define SADB_X_CALG_DEFLATE             2
-#define SADB_X_CALG_LZS                 3
-#define SADB_X_CALG_LZJH                4
-#define SADB_X_CALG_MAX                 4
--}
+packCompAlg :: CompAlg -> CInt
+packCompAlg t = case t of
+  CompAlgNone -> #const SADB_X_CALG_NONE
+  CompAlgOUI -> #const SADB_X_CALG_OUI
+  CompAlgDeflate -> #const SADB_X_CALG_DEFLATE
+  CompAlgLZS -> #const SADB_X_CALG_LZS
+  CompAlgLZJH -> #const SADB_X_CALG_LZJH
 
-data IdentType = IdentTypeReserved
-               | IdentTypePrefix
-               | IdentTypeFQDN
-               | IdentTypeUserFQDN
-               deriving (Show, Eq)
+unpackCompAlg :: CInt -> CompAlg
+unpackCompAlg t = case t of
+  (#const SADB_X_CALG_NONE) -> CompAlgNone
+  (#const SADB_X_CALG_OUI) -> CompAlgOUI
+  (#const SADB_X_CALG_DEFLATE) -> CompAlgDeflate
+  (#const SADB_X_CALG_LZS) -> CompAlgLZS
+  (#const SADB_X_CALG_LZJH) -> CompAlgLZJH
 
+data IdentType
+  = IdentTypeReserved
+  | IdentTypePrefix
+  | IdentTypeFQDN
+  | IdentTypeUserFQDN
+  deriving (Show, Eq)
 
-  {-
-/* Identity Extension values */
-#define SADB_IDENTTYPE_RESERVED 0
-#define SADB_IDENTTYPE_PREFIX   1
-#define SADB_IDENTTYPE_FQDN     2
-#define SADB_IDENTTYPE_USERFQDN 3
-#define SADB_IDENTTYPE_MAX      3
+packIdentType :: IdentType -> CInt
+packIdentType t = case t of
+  IdentTypeReserved -> #const SADB_IDENTTYPE_RESERVED
+  IdentTypePrefix -> #const SADB_IDENTTYPE_PREFIX
+  IdentTypeFQDN -> #const SADB_IDENTTYPE_FQDN
+  IdentTypeUserFQDN -> #const SADB_IDENTTYPE_USERFQDN
 
--}
+unpackIdentType :: CInt -> IdentType
+unpackIdentType t = case t of
+  (#const SADB_IDENTTYPE_RESERVED) -> IdentTypeReserved
+  (#const SADB_IDENTTYPE_PREFIX) -> IdentTypePrefix
+  (#const SADB_IDENTTYPE_FQDN) -> IdentTypeFQDN
+  (#const SADB_IDENTTYPE_USERFQDN) -> IdentTypeUserFQDN

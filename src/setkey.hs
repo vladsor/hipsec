@@ -1,25 +1,26 @@
 {-# LANGUAGE DeriveDataTypeable    #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards       #-}
 module Main (main) where
 
-import           Control.Monad
-import qualified Data.ByteString     as BS
-import qualified Data.ByteString.Char8     as BSC
-import qualified Data.ByteString.Lazy     as LBS
-import           Network.Security.Message
-import           Network.Security.PFKey
-import           System.Console.CmdArgs
 import           Control.Applicative
+import           Control.Monad
+import           Control.Monad.Extra
 import           Data.Binary              (decode, encode)
 import           Data.Bits
+import qualified Data.ByteString          as BS
+import qualified Data.ByteString.Char8    as BSC
+import qualified Data.ByteString.Lazy     as LBS
 import           Data.Char
+import           Data.Time.Clock
+import           Network.Security.Message
+import           Network.Security.PFKey
 import           Network.Socket
+import           System.Console.CmdArgs
 import           System.IO                (stdin)
 import qualified Text.Parsec              as P
 import qualified Text.Parsec.Prim         as P
-import Data.Time.Clock
 
 data SetKey =
   SetKey
@@ -35,13 +36,13 @@ setkey =
            "Dump the SAD entries.  If -P is also specified, the SPD entries are dumped.  If -p is specified, the ports are displayed."
   , flush = def &= name "F" &= help
             "Flush the SAD entries.  If -P is also specified, the SPD entries are flushed."
-  ,policy = def &= name "P" &= help "Policy entries"
-  ,cmds = def &= name "c" &= help "read commands from stdin"
+  , policy = def &= name "P" &= help "Policy entries"
+  , cmds = def &= name "c" &= help "read commands from stdin"
   }
   &=
   verbosity &=
   help "" &=
-  summary "F-IPSec-Tools v0.0.0, (C) Vladimir Sorokin 2011" &=
+  summary "hipsec v0.0.0.1, (C) Vladimir Sorokin 2011-2015 (https://github.com/vladsor/hipsec)" &=
   details ["",""
           ,"",""]
 
@@ -54,7 +55,7 @@ main = do
       when (dump opts) $ do
         s <- pfkey_open
         pfkey_send_spddump s
-        iterateM_ $ do
+        whileM $ do
           res <- pfkey_recv s
           case res of
             Nothing -> print "Nothing\n" >> return False
@@ -73,7 +74,7 @@ main = do
       when (dump opts) $ do
         s <- pfkey_open
         pfkey_send_dump s SATypeUnspec
-        iterateM_ $ do
+        whileM $ do
           res <- pfkey_recv s
           case res of
             Nothing -> print "Nothing\n" >> return False
@@ -113,7 +114,7 @@ doCommand :: PfSocket -> Command -> IO ()
 doCommand s CommandFlush = pfkey_send_flush s SATypeUnspec
 doCommand s CommandDump = do
         pfkey_send_dump s SATypeUnspec
-        iterateM_ $ do
+        whileM $ do
           res <- pfkey_recv s
           case res of
             Nothing -> print "Nothing\n" >> return False
@@ -125,7 +126,7 @@ doCommand s CommandDump = do
 doCommand s CommandSPDFlush = pfkey_send_flush s SATypeUnspec
 doCommand s CommandSPDDump = do
         pfkey_send_spddump s
-        iterateM_ $ do
+        whileM $ do
           res <- pfkey_recv s
           case res of
             Nothing -> print "Nothing\n" >> return False
@@ -146,6 +147,8 @@ doCommand s (CommandSPDAdd (Address _ prefs src) (Address _ prefd dst) upper lab
 doCommand s (CommandSPDAddTagged tag policy) = undefined
 doCommand s (CommandSPDDelete (Address _ prefs src) (Address _ prefd dst) upper policy) =
   pfkey_send_spddelete s src prefs dst prefd upper policy 0
+doCommand s (CommandSPDUpdate (Address _ prefs src) (Address _ prefd dst) upper label policy) = undefined
+doCommand s (CommandSPDUpdateTagged tag policy) = undefined
 
 data Token = Token { tknString :: String }
            | TokenNumber { tknNumber :: Int }
@@ -238,7 +241,11 @@ tokenDot = (satisfy f) >> return ()
     f _ = False
 
 tokenKey :: P.Stream s m Token => P.ParsecT s u m Key
-tokenKey = liftM (\b -> Key (8 * BS.length b) b) $ (liftM BSC.pack tokenQuotedString) <|> (liftM (BS.pack . fmap (fromIntegral . digitToInt)) tokenHexString)
+tokenKey = liftM (\b -> Key (8 * BS.length b) b) $ (liftM BSC.pack tokenQuotedString) <|> (liftM (BS.pack . g) tokenHexString)
+  where
+    g ls = if length ls .&. 1 == 0 then go [] ls else go [] ("0" ++ ls)
+    go acc (x1:x2:xs) = go (acc ++ [fromIntegral $ 16 * digitToInt x1 + digitToInt x2]) xs
+    go acc _ = acc
 
 cmdFlush :: P.Stream s m Token => P.ParsecT s u m Command
 cmdFlush = token "flush" >> return CommandFlush
@@ -264,6 +271,9 @@ parser =
                      , cmdDelete
                      , cmdDeleteAll
                      , cmdSPDAdd
+                     , cmdSPDAddTagged
+                     , cmdSPDUpdate
+                     , cmdSPDUpdateTagged
                      , cmdSPDDelete
                      ]
               tokenEOC
@@ -383,6 +393,34 @@ cmdSPDAdd = do
   spdAddPolicy <- tokenPolicy
   return CommandSPDAdd{..}
 
+cmdSPDAddTagged :: P.Stream s m Token => P.ParsecT s u m Command
+cmdSPDAddTagged = do
+  token "spdadd"
+  token "tagged"
+  spdAddTaggedTag <- tokenQuotedString
+  spdAddTaggedPolicy <- tokenPolicy
+  return CommandSPDAddTagged{..}
+
+cmdSPDUpdate :: P.Stream s m Token => P.ParsecT s u m Command
+cmdSPDUpdate = do
+  token "spdupdate"
+  spdUpdateSrcRange <- tokenAddressRange
+  spdUpdateDstRange <- tokenAddressRange
+  spdUpdateUpperSpec <- liftM read tokenString
+  token "-"
+  token "P"
+  let spdUpdateLabel = Nothing
+  spdUpdatePolicy <- tokenPolicy
+  return CommandSPDUpdate{..}
+
+cmdSPDUpdateTagged :: P.Stream s m Token => P.ParsecT s u m Command
+cmdSPDUpdateTagged = do
+  token "spdupdate"
+  token "tagged"
+  spdUpdateTaggedTag <- tokenQuotedString
+  spdUpdateTaggedPolicy <- tokenPolicy
+  return CommandSPDUpdateTagged{..}
+
 cmdSPDDelete :: P.Stream s m Token => P.ParsecT s u m Command
 cmdSPDDelete = do
   token "spddelete"
@@ -437,13 +475,23 @@ data Command
     }
   | CommandSPDAddTagged
     { spdAddTaggedTag    :: String
-    , spdAddTaggedPolicy :: String
+    , spdAddTaggedPolicy :: Policy
+    }
+  | CommandSPDUpdate
+    { spdUpdateSrcRange  :: Address
+    , spdUpdateDstRange  :: Address
+    , spdUpdateUpperSpec :: IPProto
+    , spdUpdateLabel     :: Maybe String
+    , spdUpdatePolicy    :: Policy
+    }
+  | CommandSPDUpdateTagged
+    { spdUpdateTaggedTag    :: String
+    , spdUpdateTaggedPolicy :: Policy
     }
   | CommandSPDDelete
     { spdDeleteSrcRange   :: Address
     , spdDeleteDstRange   :: Address
     , spdDeleteUppperspec :: IPProto
-    , spdDeletePolicy  :: Policy
+    , spdDeletePolicy     :: Policy
     }
   deriving (Eq, Show)
-
