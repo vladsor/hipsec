@@ -118,8 +118,16 @@ doCommand s CommandSPDDump = do
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
 doCommand s (CommandAdd src dst proto spi encAlg encKey authAlg authKey compAlg) =
   PFKey.sendAdd s proto IPSecModeAny src dst spi 0 0 authAlg authKey encAlg encKey 0 Nothing Nothing 0
-doCommand s (CommandGet src dst proto spi) =
-  PFKey.sendGet s proto src dst spi
+doCommand s (CommandGet src dst proto spi) = do
+        PFKey.sendGet s proto src dst spi
+        whileM $ do
+          res <- PFKey.recv s
+          case res of
+            Nothing -> return False
+            Just msg -> do
+              ct <- getCurrentTime
+              putStrLn $ PFKey.dumpSA msg ct
+              return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
 doCommand s (CommandDelete src dst proto spi) =
   PFKey.sendDelete s proto src dst spi
 doCommand s (CommandDeleteAll src dst proto) =
@@ -287,7 +295,7 @@ cmdGet = do
   getSrc <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
   getDst <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
   getProto <- liftM read tokenString
-  getSPI <- liftM read tokenString
+  getSPI <- tokenNumber
   return CommandGet{..}
 
 cmdDelete = do
