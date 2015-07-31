@@ -39,6 +39,7 @@ module Network.Security.Message
   , SAState(..)
   , Supported(..)
   , Packable(..)
+  , msgLength
   ) where
 
 import           Control.Monad
@@ -56,7 +57,6 @@ import           Data.Monoid ((<>))
 import           Data.Time.Clock (UTCTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds, posixSecondsToUTCTime)
 import           Data.Time.Format ()
-import           Debug.Trace
 import           Foreign (Storable)
 import           Foreign.C.Types (CInt, CUInt, CChar, CSize)
 import           Network.Socket (SockAddr(..), packFamily, unpackFamily, Family(..))
@@ -251,7 +251,7 @@ instance Binary Msg where
      putWord8 $ fromIntegral $ packMsgType msgType
      putWord8 $ fromIntegral msgErrno
      putWord8 $ fromIntegral $ packSAType msgSatype
-     trace ("msgLengh=" ++ show (msgLength' msg)) $ putWord16le $ fromIntegral $ msgLength' msg
+     putWord16le $ fromIntegral $ msgLength msg
      putWord16le 0
      putWord32le $ fromIntegral msgSeq
      putWord32le $ fromIntegral msgPid
@@ -337,8 +337,8 @@ updateMsgCnt' (left, Msg{..}) = do
     _ -> Msg{..}
 
 
-msgLength' :: Msg -> Int
-msgLength' Msg{..} = (`shiftR` 3) $ #{size struct sadb_msg}
+msgLength :: Msg -> Int
+msgLength Msg{..} = (`shiftR` 3) $ #{size struct sadb_msg}
     + sum 
     [ mlen msgSA
     , mlen msgLifetimeCurrent

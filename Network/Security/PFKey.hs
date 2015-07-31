@@ -41,7 +41,6 @@ import qualified Data.Time.Clock              as Clock
 import           Data.Time.Clock.POSIX
 import           Data.Time.Format
 import           Data.Time.LocalTime
-import           Debug.Trace
 import           Foreign.C.Types
 import           Foreign.Marshal.Alloc
 import           Foreign.Ptr

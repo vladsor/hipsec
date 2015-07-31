@@ -92,7 +92,7 @@ recv s@(Net.Socket mfd) = do
   let hdrlen = (Message.sizeOf (undefined::Msg)) :: Int
   withMVar mfd $ \fd -> do
     ret <- select'' [fd] [] [] (Time (CTimeval 10 0))
-    putStrLn $ "select:" ++ show ret
+--    putStrLn $ "select:" ++ show ret
     return ()
   buf <- Net.receive s (fromIntegral hdrlen) (Net.MessageFlags c_msg_peek)
   let hdr = decode (LBS.fromStrict buf)

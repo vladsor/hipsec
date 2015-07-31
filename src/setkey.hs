@@ -102,7 +102,6 @@ doCommand s CommandDump = do
           case res of
             Nothing -> print "Nothing\n" >> return False
             Just msg -> do
-              print $ "Message" ++ show msg ++ "\n"
               ct <- getCurrentTime
               tz <- getCurrentTimeZone
               putStrLn $ PFKey.dumpSA msg ct tz
@@ -115,7 +114,6 @@ doCommand s CommandSPDDump = do
           case res of
             Nothing -> print "Nothing\n" >> return False
             Just msg -> do
-              print $ "Message" ++ show msg ++ "\n"
               tz <- getCurrentTimeZone
               PFKey.dumpSPD msg tz
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
