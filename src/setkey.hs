@@ -14,6 +14,7 @@ import qualified Data.ByteString.Char8    as BSC
 import qualified Data.ByteString.Lazy     as LBS
 import           Data.Char
 import           Data.Time.Clock
+import           Data.Time.LocalTime
 import           Network.Security.Message
 import qualified Network.Security.PFKey as PFKey
 import           Network.Socket (SockAddr(..), HostAddress(..))
@@ -103,7 +104,8 @@ doCommand s CommandDump = do
             Just msg -> do
               print $ "Message" ++ show msg ++ "\n"
               ct <- getCurrentTime
-              putStrLn $ PFKey.dumpSA msg ct
+              tz <- getCurrentTimeZone
+              putStrLn $ PFKey.dumpSA msg ct tz
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
 doCommand s CommandSPDFlush = PFKey.sendFlush s SATypeUnspec
 doCommand s CommandSPDDump = do
@@ -114,7 +116,8 @@ doCommand s CommandSPDDump = do
             Nothing -> print "Nothing\n" >> return False
             Just msg -> do
               print $ "Message" ++ show msg ++ "\n"
-              PFKey.dumpSPD msg
+              tz <- getCurrentTimeZone
+              PFKey.dumpSPD msg tz
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
 doCommand s (CommandAdd src dst proto spi encAlg encKey authAlg authKey compAlg) =
   PFKey.sendAdd s proto IPSecModeAny src dst spi 0 0 authAlg authKey encAlg encKey 0 Nothing Nothing 0
@@ -126,7 +129,8 @@ doCommand s (CommandGet src dst proto spi) = do
             Nothing -> return False
             Just msg -> do
               ct <- getCurrentTime
-              putStrLn $ PFKey.dumpSA msg ct
+              tz <- getCurrentTimeZone
+              putStrLn $ PFKey.dumpSA msg ct tz
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
 doCommand s (CommandDelete src dst proto spi) =
   PFKey.sendDelete s proto src dst spi

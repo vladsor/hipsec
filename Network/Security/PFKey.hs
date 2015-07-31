@@ -1,4 +1,5 @@
-{-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Network.Security.PFKey
   ( Socket
@@ -32,12 +33,14 @@ import qualified Data.ByteString              as BS
 import qualified Data.ByteString.Lazy         as LBS
 import           Data.Default
 import           Data.Hex
+import           Data.List                    (intersperse)
 import           Data.Maybe
 import           Data.Monoid
 import           Data.Time.Clock
 import qualified Data.Time.Clock              as Clock
 import           Data.Time.Clock.POSIX
 import           Data.Time.Format
+import           Data.Time.LocalTime
 import           Debug.Trace
 import           Foreign.C.Types
 import           Foreign.Marshal.Alloc
@@ -52,6 +55,12 @@ import           System.Posix.IO.Select.Types
 import           System.Posix.Process
 import           System.Posix.Types
 import           Text.Printf
+
+#if MIN_VERSION_time(1,5,0)
+import Data.Time.Format(defaultTimeLocale)
+#else
+import System.Locale (defaultTimeLocale)
+#endif
 
 mkMsg :: MsgType -> SAType -> Int -> Int -> Msg
 mkMsg typ satyp seq pid =
@@ -201,7 +210,7 @@ sendSPDDump s = send3 s MsgTypeSPDDump SATypeUnspec
 
 pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport =
   case saddr of
-    Just (Address proto prefixlen addr) -> showAddr' addr proto prefixlen
+    Just (Address proto prefixlen addr) -> showAddr addr proto prefixlen
     Nothing -> ""
   ++
   case (use_natt, natt_sport) of
@@ -209,7 +218,7 @@ pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport =
     _ -> ""
   ++ " " ++
   case daddr of
-    Just (Address proto prefixlen addr) -> showAddr' addr proto prefixlen
+    Just (Address proto prefixlen addr) -> showAddr addr proto prefixlen
     Nothing -> ""
   ++
   case (use_natt, natt_dport) of
@@ -217,154 +226,99 @@ pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport =
     _ -> ""
   ++ " "
 
-dumpSA :: Msg -> UTCTime -> String
-dumpSA msg ct =
-  let sa = msgSA msg
-      sa2 = msgSA2 msg
-      saddr = msgAddressSrc msg
-      daddr = msgAddressDst msg
-      natt_type = msgNATTType msg
-      natt_sport = msgNATTSPort msg
-      natt_dport = msgNATTDPort msg
-      use_natt = case natt_type of
-        Nothing -> False
-        Just typ -> natttype typ /= 0
-  in
-   pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport ++
-   case (sa, sa2) of
+useNat = maybe False ((/= 0) . natttype)
+
+dumpSA :: Msg -> UTCTime -> TimeZone -> String
+dumpSA (msg@Msg{..}) ct tz  =
+   pfkey_sa_dump_short msgAddressSrc (useNat msgNATTType) msgNATTSPort msgAddressDst msgNATTDPort ++
+   case (msgSA, msgSA2) of
      (Nothing, Nothing) -> "No SA & SA2 extensions"
      (Just _, Nothing) -> "No SA2 extension"
      (Nothing, Just _) -> "No SA extension"
-     (Just sa', Just sa2') ->  pfkey_sa_dump_long msg ct sa' sa2'
+     (Just sa, Just sa2) -> pfkey_sa_dump_long msg ct tz sa sa2
 
-pfkey_sa_dump_long msg ct sa' sa2' =
-  let lftc = msgLifetimeCurrent msg
-      lfth = msgLifetimeHard msg
-      lfts = msgLifetimeSoft msg
-      saddr = msgAddressSrc msg
-      daddr = msgAddressDst msg
-      paddr = msgAddressProxy msg
-      auth = msgKeyAuth msg
-      enc = msgKeyEncrypt msg
-      sid = msgIdentitySrc msg
-      did = msgIdentityDst msg
-      sens = msgSensitivity msg
-      sec_ctx = msgSecCtx msg
-      natt_type = msgNATTType msg
-      natt_oa = msgNATTOA msg
-      seq = msgSeq msg
-      pid = msgPid msg
-      satyp = msgSatype msg
-      secctx = msgSecCtx msg
-      use_natt = case natt_type of
-        Nothing -> False
-        Just typ -> natttype typ /= 0
-  in
+pfkey_sa_dump_long :: Msg -> UTCTime -> TimeZone -> SA -> SA2 -> String
+pfkey_sa_dump_long (Msg{..}) ct tz (SA{..}) (SA2{..}) =
   "\n\t" ++
-  case (use_natt, satyp) of
+  case (useNat msgNATTType, msgSatype) of
      (True, SATypeESP) -> "esp-udp"
      (True, _) -> "natt+"
      _ -> ""
-  ++  show satyp ++ " mode=" ++ show (sa2Mode sa2') ++ " " ++
-  printf "spi=%u(0x%08x) reqid=%u(0x%08x)\n" (saSPI sa') (saSPI sa') (sa2ReqId sa2') (sa2ReqId sa2')
-  ++ case (use_natt, natt_oa) of
+  ++  show msgSatype ++ " mode=" ++ show sa2Mode ++ " " ++
+  printf "spi=%u(0x%08x) reqid=%u(0x%08x)\n" saSPI saSPI sa2ReqId sa2ReqId
+  ++ case (useNat msgNATTType, msgNATTOA) of
     (True, Just oa) -> "\tNAT OA=" ++ show oa ++ "\n"
     _ -> ""
-  ++ case satyp of
-    SATypeIPComp -> "\tC: " ++ show (saEncrypt sa')
-    SATypeESP -> case enc of
+  ++ case msgSatype of
+    SATypeIPComp -> "\tC: " ++ show saEncrypt
+    SATypeESP -> case msgKeyEncrypt of
       Nothing -> ""
-      Just enc' -> "\tE: " ++ show (saEncrypt sa') ++ " " ++ show enc' ++ "\n"
+      Just enc' -> "\tE: " ++ show saEncrypt ++ " " ++ show enc' ++ "\n"
     _ -> "Invalid satype"
-  ++ case auth of
+  ++ case msgKeyAuth of
     Nothing -> ""
-    Just auth' -> "\tA: " ++ show (saAuth sa') ++ " " ++ show auth' ++ "\n"
+    Just auth' -> "\tA: " ++ show saAuth ++ " " ++ show auth' ++ "\n"
   ++
-  printf "\tseq=0x%08x replay=%u flags=0x%08x " (sa2Sequence sa2') (saReplay sa') (saFlags sa')
-  ++ "state=" ++ show (saState sa') ++ "\n"
-  ++ case lftc of
+  printf "\tseq=0x%08x replay=%u flags=0x%08x " sa2Sequence saReplay saFlags
+  ++ "state=" ++ show saState ++ "\n"
+  ++ case msgLifetimeCurrent of
     Nothing -> ""
     Just tm ->
-          let off = Clock.diffUTCTime ct (ltAddTime tm) in
-          "\tcreated: " ++ strTime (ltAddTime tm) ++
-          "\tcurrent:" ++ (show ct) ++ "\n" ++
+          let off = floor $ Clock.diffUTCTime ct (ltAddTime tm) in
+          "\tcreated: " ++ strTime (ltAddTime tm) tz ++
+          "\tcurrent:" ++ strTime ct tz ++ "\n" ++
           "\tdiff:" ++ (if utcTimeToPOSIXSeconds (ltAddTime tm) == 0 then "0" else
                           show off) ++ "(s)"
-          ++ "\thard: " ++ fromMaybe "0" (fmap (show . ltAddTime) lfth) ++ "(s)"
-          ++ "\tsoft: " ++ fromMaybe "0" (fmap (show . ltAddTime) lfts) ++ "(s)\n"
-          ++ "\tlast: " ++ strTime (ltUseTime tm)
-          ++ "\thard: " ++ fromMaybe "0" (fmap (show . ltUseTime) lfth) ++ "(s)"
-          ++ "\tsoft: " ++ fromMaybe "0" (fmap (show . ltUseTime) lfts) ++ "(s)\n"
-          ++ strLifetimeByte lftc "current"
-          ++ strLifetimeByte lfth "hard"
-          ++ strLifetimeByte lfts "soft"
+          ++ "\thard: " ++ maybe "0" (show . fromEnum . utcTimeToPOSIXSeconds . ltAddTime) msgLifetimeHard ++ "(s)"
+          ++ "\tsoft: " ++ maybe "0" (show . fromEnum . utcTimeToPOSIXSeconds . ltAddTime) msgLifetimeSoft ++ "(s)\n"
+          ++ "\tlast: " ++ strTime (ltUseTime tm) tz
+          ++ "\t\t\thard: " ++ maybe "0" (show . fromEnum . utcTimeToPOSIXSeconds . ltUseTime) msgLifetimeHard ++ "(s)"
+          ++ "\tsoft: " ++ maybe "0" (show . fromEnum . utcTimeToPOSIXSeconds . ltUseTime) msgLifetimeSoft ++ "(s)\n"
+          ++ strLifetimeByte msgLifetimeCurrent "current"
+          ++ strLifetimeByte msgLifetimeHard "hard"
+          ++ strLifetimeByte msgLifetimeSoft "soft"
           ++ "\n"
 
           ++ "\tallocated: " ++ show (ltAllocations tm)
-          ++ "\thard: " ++ fromMaybe "0" (fmap (show . ltAllocations) lfth)
-          ++ "\tsoft: " ++ fromMaybe "0" (fmap (show . ltAllocations) lfts)
+          ++ "\thard: " ++ maybe "0" (show . ltAllocations) msgLifetimeHard
+          ++ "\tsoft: " ++ maybe "0" (show . ltAllocations) msgLifetimeSoft
           ++ "\n"
 
-  ++ case secctx of
-    Nothing -> ""
-    Just (SecCtx alg doi len ) -> "\tsecurity context doi: " ++ show doi ++ "\n" ++
-                                      "\tsecurity context algorithm: " ++ show alg ++ "\n" ++
-                                      "\tsecurity context length: " ++ show len ++ "\n" ++
-                                      "\tsecurity context: %s\n"
-
-  ++ "\tsadb_seq=" ++ show seq ++ " pid=" ++ show pid ++ "\n"
+  ++ maybe "" show msgSecCtx
+  ++ "\tsadb_seq=" ++ show msgSeq ++ " pid=" ++ show msgPid ++ "\n"
 
 
-dumpSPD :: Msg -> IO ()
-dumpSPD msg = do
-        let saddr = msgAddressSrc msg
-            daddr = msgAddressDst msg
-            policy = msgPolicy msg
-            lftc = msgLifetimeCurrent msg
-            lfth = msgLifetimeHard msg
-            secctx = msgSecCtx msg
-            seq = msgSeq msg
-            pid = msgPid msg
-            policy' = case policy of
-              Nothing -> error ""
-              Just p -> p
-        when (policyId policy' .&. 7 >= 3) $ putStr "(per-socket policy)\n"
-        case (saddr, daddr) of
+dumpSPD :: Msg -> TimeZone-> IO ()
+dumpSPD (Msg{..}) tz = do
+        when (maybe 0 policyId msgPolicy .&. 7 >= 3) $ putStr "(per-socket policy)\n"
+        case (msgAddressSrc, msgAddressDst) of
             (Just (Address sproto sprefixlen saddr), Just (Address dproto dprefixlen daddr)) -> do
               sport <- case saddr of
-                SockAddrInet port _ -> showAddr saddr sproto sprefixlen >> return port
-                SockAddrInet6 port _ _ _ -> showAddr saddr sproto sprefixlen >> return port
+                SockAddrInet port _ -> putStr (showAddr saddr sproto sprefixlen) >> return port
+                SockAddrInet6 port _ _ _ -> putStr (showAddr saddr sproto sprefixlen) >> return port
                 _ -> error "unsupported family"
               putStr " "
               dport <- case daddr of
-                SockAddrInet port _ -> showAddr daddr dproto dprefixlen >> return port
-                SockAddrInet6 port _ _ _ -> showAddr daddr dproto dprefixlen >> return port
+                SockAddrInet port _ -> putStr (showAddr daddr dproto dprefixlen) >> return port
+                SockAddrInet6 port _ _ _ -> putStr (showAddr daddr dproto dprefixlen) >> return port
                 _ -> error "unsupported family"
               putStr " "
               let proto = if (sproto /= dproto) then error "protocol mismatched" else sproto
-              showProtocol proto (fromIntegral sport) (fromIntegral dport)
-              putStr "\n"
+              putStrLn $ showProtocol proto (fromIntegral sport) (fromIntegral dport)
             _ -> error "incomplete addresses"
-        putStr "\tPolicy: "
-        ipsec_dump_policy policy'
-        putStr $ case lftc of
+        putStrLn $ maybe "(none)" show msgPolicy
+        putStr $ case msgLifetimeCurrent of
           Nothing -> ""
-          Just tm -> "\tcreated: " ++ strTime (ltAddTime tm) ++ " lastused: " ++ strTime (ltUseTime tm) ++ "\n"
-        putStr $ case lfth of
+          Just tm -> "\tcreated: " ++ strTime (ltAddTime tm) tz ++ "\tlastused: " ++ strTime (ltUseTime tm) tz ++ "\n"
+        putStr $ case msgLifetimeHard of
           Nothing -> ""
-          Just tm -> "\tlifetime: " ++ show (utcTimeToPOSIXSeconds . ltAddTime $ tm) ++
-                     "(s) validtime: " ++ show (utcTimeToPOSIXSeconds . ltUseTime $ tm) ++ "(s)\n"
-        putStr $ case secctx of
-          Nothing -> ""
-          Just (SecCtx alg doi len ) -> "\tsecurity context doi: " ++ show doi ++ "\n" ++
-                                        "\tsecurity context algorithm: " ++ show alg ++ "\n" ++
-                                        "\tsecurity context length: " ++ show len ++ "\n" ++
-                                        "\tsecurity context: %s\n"
-        putStrLn $ "\tspid=" ++ show (policyId policy') ++ " seq=" ++ show seq ++ " pid=" ++ show pid
+          Just tm -> "\tlifetime: " ++ show (fromEnum . utcTimeToPOSIXSeconds . ltAddTime $ tm) ++
+                     "(s) validtime: " ++ show (fromEnum . utcTimeToPOSIXSeconds . ltUseTime $ tm) ++ "(s)\n"
+        putStr $ maybe "" show msgSecCtx
+        putStrLn $ "\tspid=" ++ maybe "" (show . policyId) msgPolicy ++ " seq=" ++ show msgSeq ++ " pid=" ++ show msgPid
 
-strTime :: UTCTime -> String
-strTime time = if (utcTimeToPOSIXSeconds time == 0) then ""
-               else show time
+strTime :: UTCTime -> TimeZone -> String
+strTime time tz = if (utcTimeToPOSIXSeconds time == 0) then "" else formatTime defaultTimeLocale "%b %d %H:%M:%S %Y" (utcToLocalTime tz time)
 
 strLifetimeByte :: Maybe Lifetime -> String -> String
 strLifetimeByte Nothing title = "\t" ++ title ++ "0(bytes)"
@@ -376,20 +330,8 @@ strLifetimeByte (Just lt) title =
   in
     printf "\t%s: %.*f(%sbytes)" title w y unit
 
-showAddr :: SockAddr -> Int -> Int -> IO ()
-showAddr addr proto prefixlen = do
-  (hostName, _) <- getNameInfo [NI_NUMERICHOST] True False addr
-  putStr $ fromMaybe "" hostName
-  putStr $ "/" ++ show prefixlen
-  case addr of
-    SockAddrInet port _ -> if (port == aNY_PORT) then putStr "[any]"
-                           else putStr $ "[" ++ show port ++ "]"
-    SockAddrInet6 port _ _ _ -> if (port == aNY_PORT) then print "[any]"
-                                  else putStr $ "[" ++ show port ++ "]"
-    _ -> error "unsupported family"
-
-showAddr' :: SockAddr -> Int -> Int -> String
-showAddr' addr proto prefixlen =
+showAddr :: SockAddr -> Int -> Int -> String
+showAddr addr proto prefixlen =
   show addr ++ "/" ++ show prefixlen ++
   case addr of
     SockAddrInet port _ -> if (port == aNY_PORT) then "[any]"
@@ -398,50 +340,14 @@ showAddr' addr proto prefixlen =
                                   else "[" ++ show port ++ "]"
     _ -> error "unsupported family"
 
-showProtocol :: Int -> Int -> Int -> IO ()
+showProtocol :: Int -> Int -> Int -> String
 showProtocol proto sport dport =
   case unpack (fromIntegral proto) of
-    Just IPProtoAny -> putStr "any"
-    Just IPProtoICMPv6 -> do
-      putStr "icmp6"
-      when (not (sport == iPSecPortAny) && (sport == iPSecPortAny))
-        (putStr $ " " ++ show sport ++ "," ++ show dport)
-    Just IPProtoIPv4 -> putStr "ipv4"
-    p -> putStr $ show p
-
-priorityLow =     0xC0000000
-priorityDefault = 0x80000000
-priorityHigh    = 0x40000000
-
-ipsec_dump_policy :: Policy -> IO ()
-ipsec_dump_policy (Policy typ dir id prio reqs) = do
-  let (str, off) = if (prio == 0) then ("" , 0)
-                else if (prio < (priorityDefault `shiftR` 2) * 3) then ("prio high", prio - priorityHigh)
-                     else if (prio < (priorityDefault `shiftR` 2) * 5) then ("prio def", prio - priorityDefault)
-                          else ("prio low", prio - priorityDefault)
-      (off', operator) = if (off > 0) then (off * (-1), "-") else (off, "+")
-  if off /= 0 then do
-    putStr $ show dir ++ " " ++ str ++ "" ++ operator ++ " " ++ show off ++ " " ++ show typ
-    else if str /= "" then do
-                           putStr $ show dir ++ " " ++ str ++ " " ++ show typ
-         else do
-              putStr $ show dir ++ " " ++ show typ
-  putStr "\n"
-  if (typ /= IPSecPolicyIPSec) then return () else do
-    sequence_ $ fmap ipsec_dump_ipsecrequest reqs
-
-iPSecManualReqidMax = 0x3fff
-
-ipsec_dump_ipsecrequest :: IPSecRequest -> IO ()
-ipsec_dump_ipsecrequest (IPSecRequest proto mode level 0 Nothing) =
-  putStrLn $ show proto ++ "/" ++ show mode ++ "//" ++ show level
-ipsec_dump_ipsecrequest (IPSecRequest proto mode level reqid Nothing) =
-  let ch = if (reqid > iPSecManualReqidMax) then '#' else ':'
-  in
-   putStrLn $ show proto ++ "/" ++ show mode ++ "//" ++ show level ++ [ch] ++ show reqid
-ipsec_dump_ipsecrequest (IPSecRequest proto mode level 0 (Just (addr1, addr2))) =
-  putStrLn $ show proto ++ "/" ++ show mode ++ "/" ++ show addr1 ++ "-" ++ show addr2 ++ "/" ++ show level
-ipsec_dump_ipsecrequest (IPSecRequest proto mode level reqid (Just (addr1, addr2))) =
-  let ch = if (reqid > iPSecManualReqidMax) then '#' else ':'
-  in
-   putStrLn $ show proto ++ "/" ++ show mode ++ "/" ++ show addr1 ++ "-" ++ show addr2 ++ "/" ++ show level ++ [ch] ++ show reqid
+    Just IPProtoAny -> "any"
+    Just IPProtoICMPv6 -> "icmp6" ++
+      if (not (sport == iPSecPortAny) && (sport == iPSecPortAny))
+      then (" " ++ show sport ++ "," ++ show dport)
+      else ""
+    Just IPProtoIPv4 -> "ipv4"
+    Just p -> show p
+    _ -> ""

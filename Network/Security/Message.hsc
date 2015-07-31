@@ -50,17 +50,17 @@ import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import           Data.Default
+import           Data.List (intersperse)
 import           Data.Maybe
 import           Data.Monoid ((<>))
 import           Data.Time.Clock (UTCTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds, posixSecondsToUTCTime)
 import           Data.Time.Format ()
+import           Debug.Trace
+import           Foreign (Storable)
 import           Foreign.C.Types (CInt, CUInt, CChar, CSize)
 import           Network.Socket (SockAddr(..), packFamily, unpackFamily, Family(..))
 import           Network.Socket.Internal (sizeOfSockAddrByFamily)
-
-import Foreign (Storable)
-import           Debug.Trace
 
 class Sizable a where
   sizeOf :: a -> Int
@@ -1070,8 +1070,26 @@ data Policy = Policy
   , policyId :: Int
   , policyPriority :: Int
   , policyIPSecRequests :: [IPSecRequest]
-  } deriving (Show, Eq)
+  } deriving (Eq)
 
+priorityLow =     0xC0000000
+priorityDefault = 0x80000000
+priorityHigh    = 0x40000000
+
+instance Show Policy where
+  show (Policy typ dir id prio reqs) =
+    let (str, off) = if (prio == 0) then ("" , 0)
+                     else if (prio < (priorityDefault `shiftR` 2) * 3) then ("prio high", prio - priorityHigh)
+                          else if (prio < (priorityDefault `shiftR` 2) * 5) then ("prio def", prio - priorityDefault)
+                               else ("prio low", prio - priorityDefault)
+        (off', operator) = if (off > 0) then (off, "-") else (off * (-1), "+")
+    in
+      "\t"
+      ++ if off /= 0 then show dir ++ " " ++ str ++ "" ++ operator ++ " " ++ show off' ++ " " ++ show typ
+         else if str /= "" then show dir ++ " " ++ str ++ " " ++ show typ
+              else show dir ++ " " ++ show typ
+      ++ "\n"
+      ++ if (typ /= IPSecPolicyIPSec) then "" else "\t" ++ (join $ intersperse "\n" $ fmap (show) reqs)
 instance Sizable Policy where
    sizeOf p = #{size struct sadb_x_policy} + sum (fmap sizeOf (policyIPSecRequests p))
 
@@ -1091,7 +1109,18 @@ data IPSecRequest = IPSecRequest
   , ipsecreqLevel :: IPSecLevel
   , ipsecreqReqId :: Int
   , ipsecreqAddrs :: Maybe (SockAddr, SockAddr)
-  } deriving (Show, Eq)
+  } deriving (Eq)
+
+instance Show IPSecRequest where
+   show (IPSecRequest{..}) =
+     show ipsecreqProto ++ "/" ++ show ipsecreqMode ++ "/" ++ addrs ++ "/" ++ show ipsecreqLevel ++ reqid
+     where
+       addrs = case ipsecreqAddrs of
+         Nothing -> ""
+         Just (addr1, addr2) -> show addr1 ++ "-" ++ show addr2
+       reqid = if ipsecreqReqId == 0 then ""
+               else (if (ipsecreqReqId > 0x3fff) then "#" else ":") ++ show ipsecreqReqId
+
 
 instance Sizable IPSecRequest where
   sizeOf (IPSecRequest proto mode level reqid Nothing) =  #{size struct sadb_x_ipsecrequest}
@@ -1337,7 +1366,13 @@ data SecCtx = SecCtx
   { ctxAlg :: Int
   , ctxDoi :: Int
   , ctxLen :: Int
-  } deriving (Show, Eq)
+  } deriving (Eq)
+
+instance Show SecCtx where
+  show (SecCtx alg doi len ) = "\tsecurity context doi: " ++ show doi ++ "\n" ++
+                               "\tsecurity context algorithm: " ++ show alg ++ "\n" ++
+                               "\tsecurity context length: " ++ show len ++ "\n" ++
+                               "\tsecurity context: %s\n"
 
 instance Sizable SecCtx where
    sizeOf _ = #{size struct sadb_x_sec_ctx}
