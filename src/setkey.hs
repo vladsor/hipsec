@@ -235,7 +235,7 @@ tokenDot = (satisfy f) >> return ()
     f _ = False
 
 tokenKey :: P.Stream s m Token => P.ParsecT s u m Key
-tokenKey = liftM (\b -> Key (8 * BS.length b) b) $ (liftM BSC.pack tokenQuotedString) <|> (liftM (BS.pack . g) tokenHexString)
+tokenKey = liftM Key $ (liftM BSC.pack tokenQuotedString) <|> (liftM (BS.pack . g) tokenHexString)
   where
     g ls = if length ls .&. 1 == 0 then go [] ls else go [] ("0" ++ ls)
     go acc (x1:x2:xs) = go (acc ++ [fromIntegral $ 16 * digitToInt x1 + digitToInt x2]) xs

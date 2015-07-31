@@ -48,10 +48,13 @@ import           Data.Binary
 import           Data.Binary.Get
 import           Data.Binary.Put
 import           Data.Bits
-import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as LBS
+import           Data.Char (toLower)
 import           Data.Default
-import           Data.List (intersperse)
+import           Data.Hex
+import           Data.List (intersperse, intercalate)
+import           Data.List.Split (chunksOf)
 import           Data.Maybe
 import           Data.Monoid ((<>))
 import           Data.Time.Clock (UTCTime)
@@ -555,11 +558,12 @@ putAddr (Address proto prefixlen addr) = do
     putWord8 $ fromIntegral prefixlen
     putWord16le 0
     put addr
-putKey k@(Key bits blob) = do
-    putWord16le $ fromIntegral bits
+putKey k@(Key blob) = do
+    let bs = BS.length blob
+    putWord16le $ fromIntegral (8 * bs)
     putWord16le 0
     putByteString blob
-    let padlen = if bits .&. 0x3f /= 0 then 8 - (bits `shiftR` 3) .&. 7 else 0
+    let padlen = if bs .&. 0x7 /= 0 then 8 - bs .&. 7 else 0
     replicateM_ padlen (putWord8 0)
 putPolicy (Policy typ dir id prio reqs) = do
     putWord16le $ fromIntegral $ packIPSecPolicy typ
@@ -704,10 +708,10 @@ instance Binary Extension where
         _ <- getWord16le
         let left =  len - #{size struct sadb_key}
         if (fromIntegral bits > left * 8) then error ("invalid len for key" ++ show bits) else do
-          dat <- getByteString $ fromIntegral $ bits `shiftR` 3
+          keyData <- getByteString $ fromIntegral $ bits `shiftR` 3
           let padlen = left - (fromIntegral bits) `shiftR` 3
           _  <- getByteString $ fromIntegral padlen
-          return $ Key { keyBits = fromIntegral bits, keyData = dat}
+          return Key{..}
       getSupported = do
         _ <- getWord32le
         let left = len - fromIntegral (#{size struct sadb_supported})
@@ -877,13 +881,13 @@ instance Binary SockAddr where
       _ -> error $ "unsupported family:" ++ show family
     return addr
 
-data Key = Key
-  { keyBits :: Int
-  , keyData :: BS.ByteString
-  } deriving (Show, Eq)
+newtype Key = Key { keyData :: BS.ByteString } deriving (Eq)
+
+instance Show Key where
+  show = fmap toLower . intercalate " " . chunksOf 8 . BS.unpack . hex . keyData
 
 instance Sizable Key where
-   sizeOf (Key bits _) = #{size struct sadb_key} + if bits .&. 0x3f /= 0 then 1 + (bits `shiftR` 3) .|. 7 else (bits `shiftR` 3)
+   sizeOf (BS.length . keyData -> bs) = #{size struct sadb_key} + if (bs .&. 0x7 /= 0) then 1 + (bs) .|. 7 else bs
 
 data Identity = Identity
   { identType :: IdentType

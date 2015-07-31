@@ -34,6 +34,7 @@ library
                  , network
                  , select
                  , socket
+                 , split
                  , unix
   if flag(old-locale)
     build-depends: time < 1.5, old-locale
@@ -61,6 +62,7 @@ Executable setkey
                  , parsec >= 3.1.9
                  , select
                  , socket
+                 , split
                  , unix
   if flag(old-locale)
     build-depends: time < 1.5, old-locale
