@@ -3,13 +3,13 @@ version:        0.0.0.1
 license:        BSD3
 license-file:   LICENSE
 maintainer:     Vladimir Sorokin <v.d.sorokin@gmail.com>
-synopsis:       Low-level networking interface
-description:    Low-level networking interface
+synopsis:       Tools for configuring and using IPSEC
+description:    Tools for configuring and using IPSEC
 category:       Network
 build-type:     Simple
 cabal-version:  >=1.8
-homepage:       http://github.com/haskell/network
-bug-reports:    http://trac.haskell.org/network/
+homepage:       http://github.com/vladsor/hipsec
+bug-reports:    http://github.com/vladsor/hipsec/issues
 
 flag developer
   description: operate in developer mode

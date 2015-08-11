@@ -84,12 +84,10 @@ main = do
         PFKey.close s
 
   when (cmds opts) $ do
-    putStrLn "Read commands"
     raw <- getContents
     case (P.parse tokenize "" raw) of
       Left err -> print err
       Right xs -> do
-        print xs
         let xs' = filter (\i -> case i of
               TokenComment _ -> False
               _ -> True) xs
