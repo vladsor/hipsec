@@ -1,8 +1,10 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP             #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Network.Security.PFKey
   ( Socket
+  , AddressPair(..)
+  , IPAddrPair(..)
   , open
   , close
   , recv
@@ -46,19 +48,19 @@ import           Foreign.Marshal.Alloc
 import           Foreign.Ptr
 import           Network.Security.Message
 import           Network.Security.PFSocket
-import           Network.Socket               (NameInfoFlag (..), SockAddr (..),
-                                               aNY_PORT, getNameInfo)
 import           System.Posix.IO.Select
 import           System.Posix.IO.Select.FdSet
 import           System.Posix.IO.Select.Types
 import           System.Posix.Process
 import           System.Posix.Types
+import           System.Socket.Family.Inet    (SocketAddressInet (..))
+import           System.Socket.Family.Inet6   (SocketAddressInet6 (..))
 import           Text.Printf
 
 #if MIN_VERSION_time(1,5,0)
-import Data.Time.Format(defaultTimeLocale)
+import           Data.Time.Format             (defaultTimeLocale)
 #else
-import System.Locale (defaultTimeLocale)
+import           System.Locale                (defaultTimeLocale)
 #endif
 
 mkMsg :: MsgType -> SAType -> Int -> Int -> Msg
@@ -68,12 +70,12 @@ mkMsg typ satyp seq pid =
       , msgSeq = seq
       }
 
-send2 :: Socket -> MsgType -> SAType -> Address -> Address -> Int -> IO ()
-send2 s typ satype src dst spi = do
+send2 :: Socket -> MsgType -> SAType -> IPAddrPair -> Int -> IO ()
+send2 s typ satype (IPAddrPair4 src dst) spi = do
   pid <- liftM fromIntegral getProcessID
   let msg = (mkMsg typ satype 0 pid)
-        { msgAddressSrc = Just src
-        , msgAddressDst = Just dst
+        { msgAddressSrc = Just $ Address { addressProto = IPProtoNone, addressPrefixLen = 32, addressAddr = IPAddr4 src }
+        , msgAddressDst = Just $ Address { addressProto = IPProtoNone, addressPrefixLen = 32, addressAddr = IPAddr4 dst }
         , msgSA = Just $ SA { saSPI = spi, saReplay = 0, saState = SAStateLarval, saAuth = AuthAlgNone, saEncrypt = EncAlgNone, saFlags = 0 }
         }
   void $ send s msg
@@ -92,17 +94,46 @@ send3 s typ satyp = case typ of
           pid <- liftM fromIntegral getProcessID
           void $ send s $ mkMsg typ satyp 0 pid
 
-send4 :: Socket -> MsgType -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> UTCTime -> UTCTime -> Policy -> Int -> IO ()
-send4 s typ src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto ltime vtime policy seq = do
+data AddressPair
+  = AddressPair
+    { apProto        :: IPProto
+    , apSrcPrefixLen :: Int
+    , apDstPrefixLen :: Int
+    , apIPAddrPair   :: IPAddrPair
+    }
+  deriving (Show, Eq)
+
+data IPAddrPair
+  = IPAddrPair4
+    { iapSrcAddr4 :: SocketAddressInet
+    , iapDstAddr4 :: SocketAddressInet
+    }
+  | IPAddrPair6
+    { iapSrcAddr6 :: SocketAddressInet6
+    , iapDstAddr6 :: SocketAddressInet6
+    }
+  deriving (Show, Eq)
+
+send4 :: Socket -> MsgType -> AddressPair -> UTCTime -> UTCTime -> Policy -> Int -> IO ()
+send4 s typ (AddressPair proto spfx dpfx pair) ltime vtime policy seq = do
   pid <- liftM fromIntegral getProcessID
+  let (src, dst) =
+        case pair of
+          IPAddrPair4 src dst ->
+            ( Address { addressProto = proto, addressPrefixLen = spfx, addressAddr = IPAddr4 src }
+            , Address { addressProto = proto, addressPrefixLen = dpfx, addressAddr = IPAddr4 dst }
+            )
+          IPAddrPair6 src dst ->
+            ( Address { addressProto = proto, addressPrefixLen = spfx, addressAddr = IPAddr6 src }
+            , Address { addressProto = proto, addressPrefixLen = dpfx, addressAddr = IPAddr6 dst }
+            )
   let msg = (mkMsg typ SATypeUnspec 0 pid)
-        { msgAddressSrc = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefs, addressAddr = src }
-        , msgAddressDst = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefd, addressAddr = dst }
+        { msgAddressSrc = Just src
+        , msgAddressDst = Just dst
         , msgLifetimeHard = Just $ Lifetime { ltAllocations = 0, ltBytes = 0, ltAddTime = ltime, ltUseTime = vtime }
         , msgPolicy = Just policy
         }
   void $ send s msg
-send4 _ _ _ _ _ _ _ _ _ _ _ = error "unsupported parameters"
 
 sendFlush :: Socket -> SAType -> IO ()
 sendFlush s = send3 s MsgTypeFlush
@@ -113,32 +144,51 @@ sendDump s = send3 s MsgTypeDump
 sendPromisc :: Socket -> Bool -> IO ()
 sendPromisc s b = send3 s MsgTypePromisc $ if b then SATypeUnspec1 else SATypeUnspec
 
-sendSPDAdd :: Socket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
-sendSPDAdd s src prefs dst prefd proto policy seq =
-  send4 s MsgTypeSPDAdd src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
+sendSPDAdd :: Socket -> AddressPair -> Policy -> Int -> IO ()
+sendSPDAdd s ap policy seq =
+  send4 s MsgTypeSPDAdd ap (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
-sendSPDUpdate :: Socket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
-sendSPDUpdate s src prefs dst prefd proto policy seq =
-  send4 s MsgTypeSPDUpdate src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
+sendSPDUpdate :: Socket -> AddressPair -> Policy -> Int -> IO ()
+sendSPDUpdate s ap policy seq =
+  send4 s MsgTypeSPDUpdate ap (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
-sendSPDDelete :: Socket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
-sendSPDDelete s src prefs dst prefd proto policy seq =
-  send4 s MsgTypeSPDDelete src prefs dst prefd proto (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
+sendSPDDelete :: Socket -> AddressPair -> Policy -> Int -> IO ()
+sendSPDDelete s ap policy seq =
+  send4 s MsgTypeSPDDelete ap (posixSecondsToUTCTime 0) (posixSecondsToUTCTime 0) policy seq
 
-sendSPDAdd' :: Socket -> SockAddr -> Int -> SockAddr -> Int -> IPProto -> Policy -> Int -> IO ()
-sendSPDAdd' s src@(SockAddrInet _ _) prefs dst@(SockAddrInet _ _) prefd proto policy seq = do
+sendSPDAdd' :: Socket -> AddressPair -> Policy -> Int -> IO ()
+sendSPDAdd' s (AddressPair proto spfx dpfx pair) policy seq = do
   pid <- liftM fromIntegral getProcessID
+  let (src, dst) =
+        case pair of
+          IPAddrPair4 src dst ->
+            ( Address { addressProto = proto, addressPrefixLen = spfx, addressAddr = IPAddr4 src }
+            , Address { addressProto = proto, addressPrefixLen = dpfx, addressAddr = IPAddr4 dst }
+            )
+          IPAddrPair6 src dst ->
+            ( Address { addressProto = proto, addressPrefixLen = spfx, addressAddr = IPAddr6 src }
+            , Address { addressProto = proto, addressPrefixLen = dpfx, addressAddr = IPAddr6 dst }
+            )
   let msg = (mkMsg MsgTypeSPDAdd SATypeUnspec 0 pid)
-        { msgAddressSrc = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefs, addressAddr = src }
-        , msgAddressDst = Just $ Address { addressProto = fromIntegral $ pack proto, addressPrefixLen = prefd, addressAddr = dst }
+        { msgAddressSrc = Just src
+        , msgAddressDst = Just dst
         , msgPolicy = Just policy
         }
   void $ send s msg
-sendSPDAdd' _ _ _ _ _ _ _ _ = error "invalid params"
 
-sendAdd :: Socket -> SAType -> IPSecMode -> Address -> Address -> Int -> Int -> Int -> AuthAlg -> Key -> EncAlg -> Key -> Int -> Maybe Lifetime -> Maybe Lifetime -> Int -> IO ()
-sendAdd s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey flags sltm hltm seq = do
+sendAdd :: Socket -> SAType -> IPSecMode -> IPAddrPair -> Int -> Int -> Int -> AuthAlg -> Key -> EncAlg -> Key -> Int -> Maybe Lifetime -> Maybe Lifetime -> Int -> IO ()
+sendAdd s satyp mode pair spi reqid reply authAlg authKey encAlg encKey flags sltm hltm seq = do
   pid <- liftM fromIntegral getProcessID
+  let (src, dst) =
+        case pair of
+          IPAddrPair4 src dst ->
+            ( Address { addressProto = IPProtoNone, addressPrefixLen = 32, addressAddr = IPAddr4 src }
+            , Address { addressProto = IPProtoNone, addressPrefixLen = 32, addressAddr = IPAddr4 dst }
+            )
+          IPAddrPair6 src dst ->
+            ( Address { addressProto = IPProtoNone, addressPrefixLen = 128, addressAddr = IPAddr6 src }
+            , Address { addressProto = IPProtoNone, addressPrefixLen = 128, addressAddr = IPAddr6 dst }
+            )
   let msg = (mkMsg MsgTypeAdd satyp seq pid)
         { msgAddressSrc = Just src
         , msgAddressDst = Just dst
@@ -151,9 +201,19 @@ sendAdd s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey flags
         }
   void $ send s msg
 
-sendUpdate :: Socket -> SAType -> IPSecMode -> Address -> Address -> Int -> Int -> Int -> AuthAlg -> Key -> EncAlg -> Key -> Int -> Maybe Lifetime -> Maybe Lifetime -> Int -> IO ()
-sendUpdate s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey flags sltm hltm seq = do
+sendUpdate :: Socket -> SAType -> IPSecMode -> IPAddrPair -> Int -> Int -> Int -> AuthAlg -> Key -> EncAlg -> Key -> Int -> Maybe Lifetime -> Maybe Lifetime -> Int -> IO ()
+sendUpdate s satyp mode pair spi reqid reply authAlg authKey encAlg encKey flags sltm hltm seq = do
   pid <- liftM fromIntegral getProcessID
+  let (src, dst) =
+        case pair of
+          IPAddrPair4 src dst ->
+            ( Address { addressProto = IPProtoNone, addressPrefixLen = 32, addressAddr = IPAddr4 src }
+            , Address { addressProto = IPProtoNone, addressPrefixLen = 32, addressAddr = IPAddr4 dst }
+            )
+          IPAddrPair6 src dst ->
+            ( Address { addressProto = IPProtoNone, addressPrefixLen = 128, addressAddr = IPAddr6 src }
+            , Address { addressProto = IPProtoNone, addressPrefixLen = 128, addressAddr = IPAddr6 dst }
+            )
   let msg = (mkMsg MsgTypeUpdate satyp seq pid)
         { msgAddressSrc = Just src
         , msgAddressDst = Just dst
@@ -166,7 +226,7 @@ sendUpdate s satyp mode src dst spi reqid reply authAlg authKey encAlg encKey fl
         }
   void $ send s msg
 
-sendDelete :: Socket -> SAType -> Address -> Address -> Int -> IO ()
+sendDelete :: Socket -> SAType -> IPAddrPair -> Int -> IO ()
 sendDelete s = send2 s MsgTypeDelete
 
 grepSPI :: Socket -> SAType -> [Address] -> [Address] -> IO [Int]
@@ -185,12 +245,14 @@ grepSPI s satyp srcs dsts = send3 s MsgTypeDump satyp >> go []
           sa <- msgSA
           if (any (== src) srcs) && (any (== dst) dsts) then Just (acc ++ [saSPI sa]) else Nothing
 
+sendDeleteAll :: Socket -> SAType -> IPAddrPair -> IO ()
+sendDeleteAll s satyp ap@(IPAddrPair4 src dst) =
+  mapM_ (sendDelete s satyp ap) =<<
+      (grepSPI s satyp
+          [Address { addressProto = IPProtoNone, addressPrefixLen = 32, addressAddr = IPAddr4 src }]
+          [Address { addressProto = IPProtoNone, addressPrefixLen = 32, addressAddr = IPAddr4 dst }])
 
-sendDeleteAll :: Socket -> SAType -> Address -> Address -> IO ()
-sendDeleteAll s satyp src dst = do
-  mapM_ (sendDelete s satyp src dst) =<< (grepSPI s satyp [src] [dst])
-
-sendGet :: Socket -> SAType -> Address -> Address -> Int -> IO ()
+sendGet :: Socket -> SAType -> IPAddrPair -> Int -> IO ()
 sendGet s = send2 s MsgTypeGet
 
 sendRegister :: Socket -> SAType -> IO ()
@@ -209,7 +271,7 @@ sendSPDDump s = send3 s MsgTypeSPDDump SATypeUnspec
 
 pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport =
   case saddr of
-    Just (Address proto prefixlen addr) -> showAddr addr proto prefixlen
+    Just (Address _ _ addr) -> show addr
     Nothing -> ""
   ++
   case (use_natt, natt_sport) of
@@ -217,7 +279,7 @@ pfkey_sa_dump_short saddr use_natt natt_sport daddr natt_dport =
     _ -> ""
   ++ " " ++
   case daddr of
-    Just (Address proto prefixlen addr) -> showAddr addr proto prefixlen
+    Just (Address _ _ addr) -> show addr
     Nothing -> ""
   ++
   case (use_natt, natt_dport) of
@@ -287,34 +349,30 @@ pfkey_sa_dump_long (Msg{..}) ct tz (SA{..}) (SA2{..}) =
   ++ "\tsadb_seq=" ++ show msgSeq ++ " pid=" ++ show msgPid ++ "\n"
 
 
-dumpSPD :: Msg -> TimeZone-> IO ()
+dumpSPD :: Msg -> TimeZone -> IO ()
 dumpSPD (Msg{..}) tz = do
         when (maybe 0 policyId msgPolicy .&. 7 >= 3) $ putStr "(per-socket policy)\n"
         case (msgAddressSrc, msgAddressDst) of
             (Just (Address sproto sprefixlen saddr), Just (Address dproto dprefixlen daddr)) -> do
-              sport <- case saddr of
-                SockAddrInet port _ -> putStr (showAddr saddr sproto sprefixlen) >> return port
-                SockAddrInet6 port _ _ _ -> putStr (showAddr saddr sproto sprefixlen) >> return port
-                _ -> error "unsupported family"
+              putStr (showAddr saddr sprefixlen)
+              let sport = ipaddrPort saddr
               putStr " "
-              dport <- case daddr of
-                SockAddrInet port _ -> putStr (showAddr daddr dproto dprefixlen) >> return port
-                SockAddrInet6 port _ _ _ -> putStr (showAddr daddr dproto dprefixlen) >> return port
-                _ -> error "unsupported family"
+              putStr (showAddr saddr sprefixlen)
+              let dport = ipaddrPort daddr
               putStr " "
               let proto = if (sproto /= dproto) then error "protocol mismatched" else sproto
-              putStrLn $ showProtocol proto (fromIntegral sport) (fromIntegral dport)
-            _ -> error "incomplete addresses"
-        putStrLn $ maybe "(none)" show msgPolicy
-        putStr $ case msgLifetimeCurrent of
-          Nothing -> ""
-          Just tm -> "\tcreated: " ++ strTime (ltAddTime tm) tz ++ "\tlastused: " ++ strTime (ltUseTime tm) tz ++ "\n"
-        putStr $ case msgLifetimeHard of
-          Nothing -> ""
-          Just tm -> "\tlifetime: " ++ show (fromEnum . utcTimeToPOSIXSeconds . ltAddTime $ tm) ++
+              putStrLn $ showProtocol proto sport dport
+              putStrLn $ maybe "(none)" show msgPolicy
+              putStr $ case msgLifetimeCurrent of
+                Nothing -> ""
+                Just tm -> "\tcreated: " ++ strTime (ltAddTime tm) tz ++ "\tlastused: " ++ strTime (ltUseTime tm) tz ++ "\n"
+              putStr $ case msgLifetimeHard of
+                Nothing -> ""
+                Just tm -> "\tlifetime: " ++ show (fromEnum . utcTimeToPOSIXSeconds . ltAddTime $ tm) ++
                      "(s) validtime: " ++ show (fromEnum . utcTimeToPOSIXSeconds . ltUseTime $ tm) ++ "(s)\n"
-        putStr $ maybe "" show msgSecCtx
-        putStrLn $ "\tspid=" ++ maybe "" (show . policyId) msgPolicy ++ " seq=" ++ show msgSeq ++ " pid=" ++ show msgPid
+              putStr $ maybe "" show msgSecCtx
+              putStrLn $ "\tspid=" ++ maybe "" (show . policyId) msgPolicy ++ " seq=" ++ show msgSeq ++ " pid=" ++ show msgPid
+            _ -> return ()
 
 strTime :: UTCTime -> TimeZone -> String
 strTime time tz = if (utcTimeToPOSIXSeconds time == 0) then "" else formatTime defaultTimeLocale "%b %d %H:%M:%S %Y" (utcToLocalTime tz time)
@@ -329,24 +387,26 @@ strLifetimeByte (Just lt) title =
   in
     printf "\t%s: %.*f(%sbytes)" title w y unit
 
-showAddr :: SockAddr -> Int -> Int -> String
-showAddr addr proto prefixlen =
+showAddr :: IPAddr -> Int -> String
+showAddr addr prefixlen =
   show addr ++ "/" ++ show prefixlen ++
   case addr of
-    SockAddrInet port _ -> if (port == aNY_PORT) then "[any]"
-                           else "[" ++ show port ++ "]"
-    SockAddrInet6 port _ _ _ -> if (port == aNY_PORT) then "[any]"
-                                  else "[" ++ show port ++ "]"
-    _ -> error "unsupported family"
+    IPAddr4 (SocketAddressInet _ port) -> if (port == 0) then "[any]" else "[" ++ show port ++ "]"
+    IPAddr6 (SocketAddressInet6 _ port _ _ ) -> if (port == 0) then "[any]" else "[" ++ show port ++ "]"
 
-showProtocol :: Int -> Int -> Int -> String
+showProtocol :: IPProto -> Int -> Int -> String
 showProtocol proto sport dport =
-  case unpack (fromIntegral proto) of
-    Just IPProtoAny -> "any"
-    Just IPProtoICMPv6 -> "icmp6" ++
+  case proto of
+    IPProtoNone -> ""
+    IPProtoESP -> "esp"
+    IPProtoAH -> "ah"
+    IPProtoIPComp -> "ipcomp"
+    IPProtoIPIP -> "ipip"
+    IPProtoICMP -> "icmp"
+    IPProtoAny -> "any"
+    IPProtoICMPv6 -> "icmp6" ++
       if (not (sport == iPSecPortAny) && (sport == iPSecPortAny))
       then (" " ++ show sport ++ "," ++ show dport)
       else ""
-    Just IPProtoIPv4 -> "ipv4"
-    Just p -> show p
-    _ -> ""
+    IPProtoIPv4 -> "ipv4"
+    IPProtoUnknown p -> show p

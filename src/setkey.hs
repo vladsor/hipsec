@@ -1,27 +1,37 @@
 {-# LANGUAGE DeriveDataTypeable    #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE RecordWildCards       #-}
+
+
 module Main (main) where
 
 import           Control.Applicative
 import           Control.Monad
 import           Control.Monad.Extra
-import           Data.Binary              (decode, encode)
+import           Control.Monad.Trans.Class
+import           Data.Binary                (decode, encode)
 import           Data.Bits
-import qualified Data.ByteString          as BS
-import qualified Data.ByteString.Char8    as BSC
-import qualified Data.ByteString.Lazy     as LBS
+import qualified Data.ByteString            as BS
+import qualified Data.ByteString.Char8      as BSC
+import qualified Data.ByteString.Lazy       as LBS
 import           Data.Char
+import           Data.Maybe
+import           Data.Monoid
 import           Data.Time.Clock
 import           Data.Time.LocalTime
 import           Network.Security.Message
-import qualified Network.Security.PFKey as PFKey
-import           Network.Socket (SockAddr(..), HostAddress(..))
+import           Network.Security.PFKey     (AddressPair (..), IPAddrPair (..))
+import qualified Network.Security.PFKey     as PFKey
 import           System.Console.CmdArgs
-import           System.IO                (stdin)
-import qualified Text.Parsec              as P
-import qualified Text.Parsec.Prim         as P
+import           System.IO                  (stdin)
+import           System.Socket              (AddressInfo (..), Stream, TCP,
+                                             getAddressInfo)
+import           System.Socket.Family.Inet  (Inet, SocketAddressInet (..))
+import           System.Socket.Family.Inet6 (Inet6, SocketAddressInet6 (..))
+import qualified Text.Parsec                as P
+import qualified Text.Parsec.Prim           as P
 
 data SetKey =
   SetKey
@@ -83,7 +93,8 @@ main = do
         let xs' = filter (\i -> case i of
               TokenComment _ -> False
               _ -> True) xs
-        case (P.parse parser "" xs') of
+        r <- P.runParserT parser () "stdin" xs'
+        case r of
           Left err' -> print err'
           Right cmds -> do
             print cmds
@@ -117,10 +128,10 @@ doCommand s CommandSPDDump = do
               tz <- getCurrentTimeZone
               PFKey.dumpSPD msg tz
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
-doCommand s (CommandAdd src dst proto spi encAlg encKey authAlg authKey compAlg) =
-  PFKey.sendAdd s proto IPSecModeAny src dst spi 0 0 authAlg authKey encAlg encKey 0 Nothing Nothing 0
-doCommand s (CommandGet src dst proto spi) = do
-        PFKey.sendGet s proto src dst spi
+doCommand s (CommandAdd ap proto spi encAlg encKey authAlg authKey compAlg) =
+  PFKey.sendAdd s proto IPSecModeAny ap spi 0 0 authAlg authKey encAlg encKey 0 Nothing Nothing 0
+doCommand s (CommandGet ap proto spi) = do
+        PFKey.sendGet s proto ap spi
         whileM $ do
           res <- PFKey.recv s
           case res of
@@ -130,17 +141,17 @@ doCommand s (CommandGet src dst proto spi) = do
               tz <- getCurrentTimeZone
               putStrLn $ PFKey.dumpSA msg ct tz
               return $ (msgErrno msg == 0) && (msgSeq msg /= 0)
-doCommand s (CommandDelete src dst proto spi) =
-  PFKey.sendDelete s proto src dst spi
-doCommand s (CommandDeleteAll src dst proto) =
-  PFKey.sendDeleteAll s proto src dst
-doCommand s (CommandSPDAdd (Address _ prefs src) (Address _ prefd dst) upper label policy) =
-  PFKey.sendSPDAdd' s src prefs dst prefd upper policy 0
+doCommand s (CommandDelete ap proto spi) =
+  PFKey.sendDelete s proto ap spi
+doCommand s (CommandDeleteAll ap proto) =
+  PFKey.sendDeleteAll s proto ap
+doCommand s (CommandSPDAdd rng label policy) =
+  PFKey.sendSPDAdd' s rng policy 0
 doCommand s (CommandSPDAddTagged tag policy) = error "command 'spdadd tagged' not supported"
-doCommand s (CommandSPDDelete (Address _ prefs src) (Address _ prefd dst) upper policy) =
-  PFKey.sendSPDDelete s src prefs dst prefd upper policy 0
-doCommand s (CommandSPDUpdate (Address _ prefs src) (Address _ prefd dst) upper label policy) =
-  PFKey.sendSPDUpdate s src prefs dst prefd upper policy 0
+doCommand s (CommandSPDDelete rng policy) =
+  PFKey.sendSPDDelete s rng policy 0
+doCommand s (CommandSPDUpdate rng label policy) =
+  PFKey.sendSPDUpdate s rng policy 0
 doCommand s (CommandSPDUpdateTagged tag policy) = error "command 'spdupdate tagged' not supported"
 
 data Token
@@ -153,6 +164,7 @@ data Token
   | TokenSqBrOpen
   | TokenSqBrClose
   | TokenDot
+  | TokenColon
   | TokenComment { tknComment :: String }
   deriving (Eq, Show)
 
@@ -167,11 +179,12 @@ tokenize = P.many $ do
          , P.char '[' >> return TokenSqBrOpen
          , P.char ']' >> return TokenSqBrClose
          , P.char '.' >> return TokenDot
+         , P.char ':' >> return TokenColon
          , P.between (P.char '"') (P.char '"') (liftM TokenQuotedString $ P.many (P.noneOf "\""))
          , P.char '0' >> ((P.oneOf "xX" >> (liftM TokenHexString $ P.many1 P.hexDigit)) <|>
                          (P.many1 P.digit >>= return . TokenNumber . (foldl (\a b -> a * 10 + digitToInt b) 0)))
          , P.many1 P.digit >>= return . TokenNumber . (foldl (\a b -> a * 10 + digitToInt b) 0)
-         , P.many1 (P.noneOf " \t\n;#/[].\"") >>= return . Token
+         , P.many1 (P.noneOf " \t\n;#/[].:\"") >>= return . Token
          ]
   P.optionMaybe separator
   return tkn
@@ -241,22 +254,11 @@ tokenKey = liftM Key $ (liftM BSC.pack tokenQuotedString) <|> (liftM (BS.pack . 
     go acc (x1:x2:xs) = go (acc ++ [fromIntegral $ 16 * digitToInt x1 + digitToInt x2]) xs
     go acc _ = acc
 
-cmdFlush :: P.Stream s m Token => P.ParsecT s u m Command
-cmdFlush = token "flush" >> return CommandFlush
+type Parser r = forall s u. P.Stream s IO Token => P.ParsecT s u IO r
 
-cmdDump :: P.Stream s m Token => P.ParsecT s u m Command
-cmdDump = token "dump" >> return CommandDump
-
-cmdSPDFlush :: P.Stream s m Token => P.ParsecT s u m Command
-cmdSPDFlush = token "spdflush" >> return CommandSPDFlush
-
-cmdSPDDump :: P.Stream s m Token => P.ParsecT s u m Command
-cmdSPDDump = token "spddump" >> return CommandSPDDump
-
-parser =
-  P.many1 (do
-              cmd <- P.choice
-                     [ cmdFlush
+parser :: Parser [Command]
+parser = P.many1 $ do
+  cmd <- P.choice    [ cmdFlush
                      , cmdDump
                      , cmdSPDFlush
                      , cmdSPDDump
@@ -270,14 +272,43 @@ parser =
                      , cmdSPDUpdateTagged
                      , cmdSPDDelete
                      ]
-              tokenEOC
-              return cmd)
+  tokenEOC
+  return cmd
 
+cmdFlush :: Parser Command
+cmdFlush = token "flush" >> return CommandFlush
 
+cmdDump :: Parser Command
+cmdDump = token "dump" >> return CommandDump
+
+cmdSPDFlush :: Parser Command
+cmdSPDFlush = token "spdflush" >> return CommandSPDFlush
+
+cmdSPDDump :: Parser Command
+cmdSPDDump = token "spddump" >> return CommandSPDDump
+
+tokenIP4 :: Parser SocketAddressInet
+tokenIP4 = do
+  v1 <- liftM fromIntegral tokenNumber
+  tokenDot
+  v2 <- liftM fromIntegral tokenNumber
+  tokenDot
+  v3 <- liftM fromIntegral tokenNumber
+  tokenDot
+  v4 <- liftM fromIntegral tokenNumber
+  ai <- liftM (socketAddress . head) $ lift (getAddressInfo (Just (BSC.pack (show v1 ++ "." ++ show v2 ++ "." ++ show v3 ++ "." ++ show v4))) Nothing mempty :: IO [AddressInfo Inet Stream TCP])
+  return $ ai
+
+tokenIPPair :: Parser IPAddrPair
+tokenIPPair = do
+  src <- tokenIP4
+  dst <- tokenIP4
+  return $ IPAddrPair4 src dst
+
+cmdAdd :: Parser Command
 cmdAdd = do
   token "add"
-  addSrc <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
-  addDst <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  addIPPair <- tokenIPPair
   addProto <- liftM read tokenString
   addSPI <- tokenNumber
   token "-"
@@ -292,41 +323,47 @@ cmdAdd = do
 
   return CommandAdd{..}
 
+cmdGet :: Parser Command
 cmdGet = do
   token "get"
-  getSrc <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
-  getDst <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  getIPPair <- tokenIPPair
   getProto <- liftM read tokenString
   getSPI <- tokenNumber
   return CommandGet{..}
 
+cmdDelete :: Parser Command
 cmdDelete = do
   token "delete"
-  deleteSrc <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
-  deleteDst <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  deleteIPPair <- tokenIPPair
   deleteProto <- liftM read tokenString
   deleteSPI <- tokenNumber
   return CommandDelete{..}
 
+cmdDeleteAll :: Parser Command
 cmdDeleteAll = do
   token "deleteall"
-  deleteAllSrc <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
-  deleteAllDst <- liftM (Address 0 32 . SockAddrInet 0) tokenIP
+  deleteAllIPPair <- tokenIPPair
   deleteAllProto <- liftM read tokenString
   return CommandDeleteAll{..}
 
-tokenIP :: P.Stream s m Token => P.ParsecT s u m HostAddress
-tokenIP = do
-  v1 <- tokenNumber
-  tokenDot
-  v2 <- tokenNumber
-  tokenDot
-  v3 <- tokenNumber
-  tokenDot
-  v4 <- tokenNumber
-  return $ fromIntegral $ v1 .|. v2 `shift` 8 .|. v3 `shift` 16 .|. v4 `shift` 24
+tokenSrcDst :: Parser (IPAddr, IPAddr)
+tokenSrcDst = do
+  SocketAddressInet src _ <- tokenIP4
+  sport <- P.optionMaybe $ do
+    tokenSqBrOpen
+    port <- tokenNumber
+    tokenSqBrClose
+    return $ fromIntegral port
+  token "-"
+  SocketAddressInet dst _ <- tokenIP4
+  dport <- P.optionMaybe $ do
+    tokenSqBrOpen
+    port <- tokenNumber
+    tokenSqBrClose
+    return $ fromIntegral port
+  return (IPAddr4 $ SocketAddressInet src $ fromMaybe 0 sport, IPAddr4 $ SocketAddressInet dst $ fromMaybe 0 dport)
 
-tokenPolicy :: P.Stream s m Token => P.ParsecT s u m Policy
+tokenPolicy :: Parser Policy
 tokenPolicy = do
   policyDir <- liftM read tokenString
   policyType' <- P.optionMaybe $ liftM read tokenString
@@ -335,7 +372,6 @@ tokenPolicy = do
       let policyType = IPSecPolicyNone
       let policyId = 0
       let policyPriority = 0
-      let ipsecreqReqId = 0
       let policyIPSecRequests = []
       return Policy{..}
     Just policyType -> do
@@ -343,11 +379,7 @@ tokenPolicy = do
       tokenSlash
       ipsecreqMode <- liftM read tokenString
       tokenSlash
-      ipsecreqAddrs <- P.optionMaybe $ do
-        src <- tokenIP
-        token "-"
-        dst <- tokenIP
-        return (SockAddrInet 0 src, SockAddrInet 0 dst)
+      ipsecreqAddrs <- P.optionMaybe tokenSrcDst
       tokenSlash
 
       ipsecreqLevel <- liftM read tokenString
@@ -358,45 +390,50 @@ tokenPolicy = do
       let policyIPSecRequests = return IPSecRequest{..}
       return Policy{..}
 
-tokenAddressRange :: P.Stream s m Token => P.ParsecT s u m Address
+
+tokenAddressRange :: Parser (IPAddr, Int)
 tokenAddressRange = do
-  ip <- tokenIP
-  P.choice [ do
-                return $ Address { addressProto = 0
-                                 , addressPrefixLen = 32
-                                 , addressAddr = SockAddrInet 0 ip
-                                 }
+  ip <- tokenIP4
+  P.choice [ return (IPAddr4 ip, 32)
            , do
                 tokenSlash
                 pref <- tokenNumber
-                return undefined
+                return (IPAddr4 ip, pref)
            , do
                 tokenSqBrOpen
                 port <- tokenNumber
                 tokenSqBrClose
-                return undefined
+                return (IPAddr4 ip, 32)
            , do
                 tokenSlash
                 pref <- tokenNumber
                 tokenSqBrOpen
                 port <- tokenNumber
                 tokenSqBrClose
-                return undefined
+                return (IPAddr4 ip, pref)
            ]
 
-cmdSPDAdd :: P.Stream s m Token => P.ParsecT s u m Command
+tokenAddressPair :: Parser AddressPair
+tokenAddressPair = do
+  iapSrcAddr4 <- tokenIP4
+  iapDstAddr4 <- tokenIP4
+  let apIPAddrPair = IPAddrPair4{..}
+  apProto <- liftM read tokenString
+  let apSrcPrefixLen = 32
+  let apDstPrefixLen = 32
+  return AddressPair{..}
+
+cmdSPDAdd :: Parser Command
 cmdSPDAdd = do
   token "spdadd"
-  spdAddSrcRange <- tokenAddressRange
-  spdAddDstRange <- tokenAddressRange
-  spdAddUpperSpec <- liftM read tokenString
+  spdAddRange <- tokenAddressPair
   token "-"
   token "P"
   let spdAddLabel = Nothing
   spdAddPolicy <- tokenPolicy
   return CommandSPDAdd{..}
 
-cmdSPDAddTagged :: P.Stream s m Token => P.ParsecT s u m Command
+cmdSPDAddTagged :: Parser Command
 cmdSPDAddTagged = do
   token "spdadd"
   token "tagged"
@@ -404,19 +441,17 @@ cmdSPDAddTagged = do
   spdAddTaggedPolicy <- tokenPolicy
   return CommandSPDAddTagged{..}
 
-cmdSPDUpdate :: P.Stream s m Token => P.ParsecT s u m Command
+cmdSPDUpdate :: Parser Command
 cmdSPDUpdate = do
   token "spdupdate"
-  spdUpdateSrcRange <- tokenAddressRange
-  spdUpdateDstRange <- tokenAddressRange
-  spdUpdateUpperSpec <- liftM read tokenString
+  spdUpdateRange <- tokenAddressPair
   token "-"
   token "P"
   let spdUpdateLabel = Nothing
   spdUpdatePolicy <- tokenPolicy
   return CommandSPDUpdate{..}
 
-cmdSPDUpdateTagged :: P.Stream s m Token => P.ParsecT s u m Command
+cmdSPDUpdateTagged :: Parser Command
 cmdSPDUpdateTagged = do
   token "spdupdate"
   token "tagged"
@@ -424,12 +459,10 @@ cmdSPDUpdateTagged = do
   spdUpdateTaggedPolicy <- tokenPolicy
   return CommandSPDUpdateTagged{..}
 
-cmdSPDDelete :: P.Stream s m Token => P.ParsecT s u m Command
+cmdSPDDelete :: Parser Command
 cmdSPDDelete = do
   token "spddelete"
-  spdDeleteSrcRange <- tokenAddressRange
-  spdDeleteDstRange <- tokenAddressRange
-  spdDeleteUppperspec <- liftM read tokenString
+  spdDeleteRange <- tokenAddressPair
   token "-"
   token "P"
   let spdAddLabel = Nothing
@@ -442,8 +475,7 @@ data Command
   | CommandSPDFlush
   | CommandSPDDump
   | CommandAdd
-    { addSrc     :: Address
-    , addDst     :: Address
+    { addIPPair  :: IPAddrPair
     , addProto   :: SAType
     , addSPI     :: Int
     , addEncAlg  :: EncAlg
@@ -453,48 +485,39 @@ data Command
     , addCompAlg :: CompAlg
     }
   | CommandGet
-    { getSrc   :: Address
-    , getDst   :: Address
-    , getProto :: SAType
-    , getSPI   :: Int
+    { getIPPair :: IPAddrPair
+    , getProto  :: SAType
+    , getSPI    :: Int
     }
   | CommandDelete
-    { deleteSrc   :: Address
-    , deleteDst   :: Address
-    , deleteProto :: SAType
-    , deleteSPI   :: Int
+    { deleteIPPair :: IPAddrPair
+    , deleteProto  :: SAType
+    , deleteSPI    :: Int
     }
   | CommandDeleteAll
-    { deleteAllSrc   :: Address
-    , deleteAllDst   :: Address
-    , deleteAllProto :: SAType
+    { deleteAllIPPair :: IPAddrPair
+    , deleteAllProto  :: SAType
     }
   | CommandSPDAdd
-    { spdAddSrcRange  :: Address
-    , spdAddDstRange  :: Address
-    , spdAddUpperSpec :: IPProto
-    , spdAddLabel     :: Maybe String
-    , spdAddPolicy    :: Policy
+    { spdAddRange  :: AddressPair
+    , spdAddLabel  :: Maybe String
+    , spdAddPolicy :: Policy
     }
   | CommandSPDAddTagged
     { spdAddTaggedTag    :: String
     , spdAddTaggedPolicy :: Policy
     }
   | CommandSPDUpdate
-    { spdUpdateSrcRange  :: Address
-    , spdUpdateDstRange  :: Address
-    , spdUpdateUpperSpec :: IPProto
-    , spdUpdateLabel     :: Maybe String
-    , spdUpdatePolicy    :: Policy
+    { spdUpdateRange  :: AddressPair
+    , spdUpdateLabel  :: Maybe String
+    , spdUpdatePolicy :: Policy
     }
   | CommandSPDUpdateTagged
     { spdUpdateTaggedTag    :: String
     , spdUpdateTaggedPolicy :: Policy
     }
   | CommandSPDDelete
-    { spdDeleteSrcRange   :: Address
-    , spdDeleteDstRange   :: Address
-    , spdDeleteUppperspec :: IPProto
-    , spdDeletePolicy     :: Policy
+    { spdDeleteRange  :: AddressPair
+    , spdDeletePolicy :: Policy
     }
   deriving (Eq, Show)

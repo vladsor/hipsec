@@ -39,6 +39,8 @@ module Network.Security.Message
   , SAState(..)
   , Supported(..)
   , Packable(..)
+  , IPAddr(..)
+  , ipaddrPort
   , msgLength
   ) where
 
@@ -48,8 +50,11 @@ import           Data.Binary
 import           Data.Binary.Get
 import           Data.Binary.Put
 import           Data.Bits
+import qualified Data.ByteString as BS8
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Unsafe as BS
+import qualified Data.ByteString.Internal as BS
 import           Data.Char (toLower)
 import           Data.Default
 import           Data.Hex
@@ -60,10 +65,15 @@ import           Data.Monoid ((<>))
 import           Data.Time.Clock (UTCTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds, posixSecondsToUTCTime)
 import           Data.Time.Format ()
-import           Foreign (Storable)
+import qualified Foreign as Foreign
+import qualified Foreign.ForeignPtr.Unsafe as Foreign
+import           System.Socket.Family (familyNumber)
 import           Foreign.C.Types (CInt, CUInt, CChar, CSize)
-import           Network.Socket (SockAddr(..), packFamily, unpackFamily, Family(..))
-import           Network.Socket.Internal (sizeOfSockAddrByFamily)
+import           System.Socket.Family.Inet (SocketAddressInet(..), Inet)
+import           System.Socket.Family.Inet6 (SocketAddressInet6(..), Inet6)
+import           System.IO.Unsafe (unsafePerformIO)
+import qualified System.Socket.Family.Inet as Inet
+import qualified System.Socket.Family.Inet6 as Inet6
 
 class Sizable a where
   sizeOf :: a -> Int
@@ -156,6 +166,7 @@ iPSecPortAny = #const IPSEC_PORT_ANY
 
 data IPProto
   = IPProtoAny
+  | IPProtoNone
   | IPProtoESP
   | IPProtoAH
   | IPProtoIPComp
@@ -168,6 +179,7 @@ data IPProto
 
 instance Show IPProto where
   show IPProtoAny = "any"
+  show IPProtoNone = "none"
   show IPProtoESP = "esp"
   show IPProtoAH = "ah"
   show IPProtoIPComp = "ipcomp"
@@ -197,6 +209,7 @@ instance Packable IPProto where
 packIPProto :: IPProto -> CInt
 packIPProto p = case p of
   IPProtoAny -> 255
+  IPProtoNone -> 0
   IPProtoESP -> 50
   IPProtoAH -> 51
   IPProtoIPComp -> 108
@@ -209,6 +222,7 @@ packIPProto p = case p of
 unpackIPProto :: CInt -> IPProto
 unpackIPProto p = case p of
   255 -> IPProtoAny
+  0 -> IPProtoNone
   50 -> IPProtoESP
   51 -> IPProtoAH
   108 -> IPProtoIPComp
@@ -554,7 +568,7 @@ data Extension
   deriving (Eq, Show)
 
 putAddr (Address proto prefixlen addr) = do
-    putWord8 $ fromIntegral proto
+    putWord8 $ fromIntegral $ packIPProto proto
     putWord8 $ fromIntegral prefixlen
     putWord16le 0
     put addr
@@ -697,7 +711,7 @@ instance Binary Extension where
         return Policy{..}
 
       getAddress = do
-        addressProto <- liftM fromIntegral getWord8
+        addressProto <- liftM (unpackIPProto . fromIntegral) getWord8
         addressPrefixLen <- liftM fromIntegral getWord8
         _ <- getWord16le
         addressAddr <- get
@@ -826,60 +840,57 @@ instance Binary Lifetime where
     return Lifetime{..}
 
 data Address = Address
-  { addressProto :: Int
+  { addressProto :: IPProto
   , addressPrefixLen :: Int
-  , addressAddr :: SockAddr
+  , addressAddr :: IPAddr
   } deriving (Show, Eq)
 
 instance Sizable Address where
    sizeOf (Address _ _ addr) = #{size struct sadb_address} + sizeOf addr
 
-instance Sizable SockAddr where
-   sizeOf addr =
-     case addr of
-          SockAddrInet6 _ _ _ _ -> #{size struct sockaddr_in6}
-          SockAddrInet _ _ -> #{size struct sockaddr_in}
+data IPAddr
+  = IPAddr4 SocketAddressInet
+  | IPAddr6 SocketAddressInet6
+  deriving (Eq)
 
-instance Binary SockAddr where
-  put addr = do
-    case addr of
-      SockAddrInet6 port flowinfo (ha0, ha1, ha2, ha3) scopeid -> do
-        putWord16le $ fromIntegral $ packFamily AF_INET6
-        putWord16le $ fromIntegral port
-        putWord32be flowinfo
-        putWord32be ha0
-        putWord32be ha1
-        putWord32be ha2
-        putWord32be ha3
-        putWord32le scopeid
-        putWord16le 0
-      SockAddrInet port inet -> do
-        putWord16le $ fromIntegral $ packFamily AF_INET
-        putWord16le $ fromIntegral port
-        putWord32le inet
-        putWord64le 0
-      _ -> error "unsupported family"
+instance Show IPAddr where
+  show (IPAddr4 (SocketAddressInet a p)) | p == 0 = show a
+  show (IPAddr4 (SocketAddressInet a p)) = show a ++ ":" ++ show p
+  show (IPAddr6 (SocketAddressInet6 a p _ _)) | p == 0 = show a
+  show (IPAddr6 (SocketAddressInet6 a p _ _)) = show a ++ ":" ++ show p
 
+ipaddrPort :: IPAddr -> Int
+ipaddrPort (IPAddr4 (SocketAddressInet _ (Inet.Port p))) = fromIntegral p
+ipaddrPort (IPAddr6 (SocketAddressInet6 _ (Inet6.Port p) _ _)) = fromIntegral p
+
+instance Sizable IPAddr where
+  sizeOf (IPAddr4 a) = Foreign.sizeOf a
+  sizeOf (IPAddr6 a) = Foreign.sizeOf a
+
+instance Binary IPAddr where
+  put (IPAddr4 a) =
+    putByteString $ unsafePerformIO $
+      Foreign.alloca $ \ptr -> do
+        Foreign.poke (Foreign.castPtr ptr) a
+        BS.unsafePackCStringLen (ptr, Foreign.sizeOf a)
+  put (IPAddr6 a) =
+    putByteString $ unsafePerformIO $
+      Foreign.alloca $ \ptr -> do
+        Foreign.poke (Foreign.castPtr ptr) a
+        BS.unsafePackCStringLen (ptr, Foreign.sizeOf a)
   get = do
-    family <- getWord16le >>= return . unpackFamily . fromIntegral
-    addr <- case family of
-      AF_INET6 -> do
-        port <- getWord16le
-        flowinfo <- getWord32be
-        ha0 <- getWord32be 
-        ha1 <- getWord32be
-        ha2 <- getWord32be
-        ha3 <- getWord32be
-        scopeid <- getWord32le
-        _ <- getByteString 8
-        return $ SockAddrInet6 (fromIntegral port) flowinfo (ha0, ha1, ha2, ha3) scopeid
-      AF_INET -> do
-        port <- getWord16le
-        inet <- getWord32le
-        _ <- getByteString 8
-        return $ SockAddrInet (fromIntegral port) inet
-      _ -> error $ "unsupported family:" ++ show family
-    return addr
+    family <- liftM fromIntegral getWord16le
+    if family == familyNumber (undefined :: Inet)
+       then do
+         bs <- liftM (BS.append $ BS8.pack $ fmap fromIntegral [family .&. 0xff, family `shiftR` 3]) $ getByteString (Foreign.sizeOf (undefined :: SocketAddressInet) - 2)
+         let addr = unsafePerformIO $ Foreign.peek $ Foreign.castPtr $ Foreign.unsafeForeignPtrToPtr ((\(a,_,_)->a) $ BS.toForeignPtr bs)
+         return $ IPAddr4 addr
+       else if family == familyNumber (undefined :: Inet6)
+        then do
+          bs <- liftM (BS.append $ BS8.pack $ fmap fromIntegral [family .&. 0xff, family `shiftR` 3]) $ getByteString (Foreign.sizeOf (undefined :: SocketAddressInet6) - 2)
+          let addr = unsafePerformIO $ Foreign.peek $ Foreign.castPtr $ Foreign.unsafeForeignPtrToPtr ((\(a,_,_)->a) $ BS.toForeignPtr bs)
+          return $ IPAddr6 addr
+        else fail "invalid family"
 
 newtype Key = Key { keyData :: BS.ByteString } deriving (Eq)
 
@@ -1112,7 +1123,7 @@ data IPSecRequest = IPSecRequest
   , ipsecreqMode :: IPSecMode
   , ipsecreqLevel :: IPSecLevel
   , ipsecreqReqId :: Int
-  , ipsecreqAddrs :: Maybe (SockAddr, SockAddr)
+  , ipsecreqAddrs :: Maybe (IPAddr, IPAddr)
   } deriving (Eq)
 
 instance Show IPSecRequest where
