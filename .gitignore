@@ -1,6 +1,9 @@
 *.hi
 *.o
 *.hs~
+*.hsc~
+*_flymake.hs
+*.hs#
 dist/
 src/main
 *.aux
