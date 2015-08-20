@@ -1,80 +1,92 @@
-name:           hipsec
-version:        0.0.0.1
-license:        BSD3
-license-file:   LICENSE
-maintainer:     Vladimir Sorokin <v.d.sorokin@gmail.com>
-synopsis:       Tools for configuring and using IPSEC
-description:    Tools for configuring and using IPSEC
-category:       Network
-build-type:     Simple
-cabal-version:  >=1.8
-homepage:       http://github.com/vladsor/hipsec
-bug-reports:    http://github.com/vladsor/hipsec/issues
-
-flag developer
-  description: operate in developer mode
-  default: False
-  manual: True
-
-flag old-locale
-  description: If false then depend on time >= 1.5.
-               .
-               If true then depend on time < 1.5 together with old-locale.
-  default: False
-
-library
-    exposed-modules: Network.Security.Message, Network.Security.PFKey, Network.Security.PFSocket
-    build-depends: base >= 4.0.0.0
-                 , binary >= 0.5.0.0
-                 , bytestring
-                 , data-default
-                 , extra >= 1.3.1
-                 , hex
-                 , ioctl
-                 , transformers
-                 , select
-                 , socket
-                 , split
-                 , unix
-  if flag(old-locale)
-    build-depends: time < 1.5, old-locale
-  else
-    build-depends: time >= 1.5
-
-  if flag(developer)
-    ghc-prof-options: -auto-all
-
-    ghc-options: -fwarn-incomplete-patterns
-
-Executable setkey
-    main-is: src/setkey.hs
-    buildable: True
-
-    build-depends: base >= 4.0.0.0
-                 , binary >= 0.5.0.0
-                 , bytestring
-                 , cmdargs >= 0.10.13
-                 , data-default
-                 , extra >= 1.3.1
-                 , hex
-                 , hipsec
-                 , ioctl
-                 , transformers
-                 , parsec >= 3.1.9
-                 , select
-                 , socket
-                 , split
-                 , unix
-  if flag(old-locale)
-    build-depends: time < 1.5, old-locale
-  else
-    build-depends: time >= 1.5
-
-  if flag(developer)
-    ghc-prof-options: -auto-all
-
-    ghc-options: -fwarn-incomplete-patterns
+name: hipsec
+version: 0.0.0.1
+cabal-version: >=1.8
+build-type: Simple
+license: BSD3
+license-file: LICENSE
+maintainer: Vladimir Sorokin <v.d.sorokin@gmail.com>
+homepage: http://github.com/vladsor/hipsec
+bug-reports: http://github.com/vladsor/hipsec/issues
+synopsis: Tools for configuring and using IPSEC
+description:
+    Tools for configuring and using IPSEC
+category: Network
 
 source-repository head
-  type:     git
-  location: git://github.com/haskell/network.git
+    type: git
+    location: git://github.com/vladsor/hipsec.git
+
+flag developer
+    description:
+        operate in developer mode
+    default: False
+    manual: True
+
+flag old-locale
+    description:
+        If false then depend on time >= 1.5.
+        .
+        If true then depend on time < 1.5 together with old-locale.
+    default: False
+
+library
+
+    if flag(old-locale)
+        build-depends:
+            time <1.5,
+            old-locale -any
+    else
+        build-depends:
+            time >=1.5
+
+    if flag(developer)
+        ghc-prof-options: -auto-all
+        ghc-options: -fwarn-incomplete-patterns
+    exposed-modules:
+        Network.Security.Message
+        Network.Security.PFKey
+        Network.Security.PFSocket
+    build-depends:
+        base >=4.7.0.2 && <4.8,
+        binary >=0.7.1.0 && <0.8,
+        bytestring >=0.10.4.0 && <0.11,
+        data-default >=0.5.3 && <0.6,
+        extra >=1.3.1 && <1.4,
+        hex >=0.1.2 && <0.2,
+        transformers >=0.3.0.0 && <0.4,
+        select >=0.4.0.1 && <0.5,
+        socket >=0.5.2.0 && <0.6,
+        split >=0.2.2 && <0.3,
+        unix >=2.7.0.1 && <2.8
+
+executable setkey
+
+    if flag(old-locale)
+        build-depends:
+            time <1.5,
+            old-locale -any
+    else
+        build-depends:
+            time >=1.5
+
+    if flag(developer)
+        ghc-prof-options: -auto-all
+        ghc-options: -fwarn-incomplete-patterns
+    main-is: src/setkey.hs
+    build-depends:
+        base >=4.7.0.2 && <4.8,
+        binary >=0.7.1.0 && <0.8,
+        bytestring >=0.10.4.0 && <0.11,
+        cmdargs >=0.10.13 && <0.11,
+        data-default >=0.5.3 && <0.6,
+        extra >=1.3.1 && <1.4,
+        hex >=0.1.2 && <0.2,
+        hipsec -any,
+        transformers >=0.3.0.0 && <0.4,
+        parsec >=3.1.9 && <3.2,
+        select >=0.4.0.1 && <0.5,
+        socket >=0.5.2.0 && <0.6,
+        split >=0.2.2 && <0.3,
+        unix >=2.7.0.1 && <2.8,
+        exceptions
+
