@@ -190,7 +190,7 @@ instance Show IPProto where
   show (IPProtoUnknown v) = show v
 
 instance Read IPProto where
-  readsPrec _ = 
+  readsPrec _ =
     tryParse
     [ ("any", IPProtoAny)
     , ("esp", IPProtoESP)
@@ -199,6 +199,7 @@ instance Read IPProto where
     , ("ipip", IPProtoIPIP)
     , ("ipv4", IPProtoIPv4)
     , ("ipv6-icmp", IPProtoICMPv6)
+    , ("icmp6", IPProtoICMPv6)
     , ("icmp", IPProtoICMP)
     ]
 
@@ -572,7 +573,7 @@ putAddr (Address proto prefixlen addr) = do
     putWord8 $ fromIntegral prefixlen
     putWord16le 0
     put addr
-putKey k@(Key blob) = do
+putKey (Key blob) = do
     let bs = BS.length blob
     putWord16le $ fromIntegral (8 * bs)
     putWord16le 0
@@ -1100,9 +1101,9 @@ instance Show Policy where
         (off', operator) = if (off > 0) then (off, "-") else (off * (-1), "+")
     in
       "\t"
-      ++ if off /= 0 then show dir ++ " " ++ str ++ "" ++ operator ++ " " ++ show off' ++ " " ++ show typ
+      ++ (if off /= 0 then show dir ++ " " ++ str ++ "" ++ operator ++ " " ++ show off' ++ " " ++ show typ
          else if str /= "" then show dir ++ " " ++ str ++ " " ++ show typ
-              else show dir ++ " " ++ show typ
+              else show dir ++ " " ++ show typ)
       ++ "\n"
       ++ if (typ /= IPSecPolicyIPSec) then "" else "\t" ++ (join $ intersperse "\n" $ fmap (show) reqs)
 instance Sizable Policy where
@@ -1161,7 +1162,7 @@ instance Binary IPSecRequest where
     put saddr
     put daddr
   get = do
-    len <- getWord16le -- >>= return . fromIntegral
+    len <- getWord16le
     ipsecreqProto <- liftM (unpackIPProto . fromIntegral) getWord16le
     ipsecreqMode <- getWord8 >>= return . unpackIPSecMode . fromIntegral
     ipsecreqLevel <- getWord8 >>= return . unpackIPSecLevel . fromIntegral
@@ -1183,19 +1184,19 @@ data IPSecMode
   | IPSecModeBeet
   deriving (Eq)
 
-instance Show IPSecMode where 
+instance Show IPSecMode where
   show IPSecModeAny = "any"
   show IPSecModeTransport = "transport"
   show IPSecModeTunnel = "tunnel"
   show IPSecModeBeet = "beet"
 
 instance Read IPSecMode where
-  readsPrec _ = 
+  readsPrec _ =
     tryParse
     [ ("any", IPSecModeAny)
     , ("transport", IPSecModeTransport)
     , ("tunnel", IPSecModeTunnel)
-    , ("beet", IPSecModeTunnel)
+    , ("beet", IPSecModeBeet)
     ]
 
 packIPSecMode :: IPSecMode -> CInt
@@ -1230,7 +1231,7 @@ instance Show IPSecDir where
   show IPSecDirInvalid = "invalid"
 
 instance Read IPSecDir where
-  readsPrec _ = 
+  readsPrec _ =
     tryParse
     [ ("any", IPSecDirAny)
     , ("in", IPSecDirInbound)
