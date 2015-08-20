@@ -389,10 +389,7 @@ strLifetimeByte (Just lt) title =
 
 showAddr :: IPAddr -> Int -> String
 showAddr addr prefixlen =
-  show addr ++ "/" ++ show prefixlen ++
-  case addr of
-    IPAddr4 (SocketAddressInet _ port) -> if (port == 0) then "[any]" else "[" ++ show port ++ "]"
-    IPAddr6 (SocketAddressInet6 _ port _ _ ) -> if (port == 0) then "[any]" else "[" ++ show port ++ "]"
+  show addr ++ "/" ++ show prefixlen ++ if (ipaddrPort addr == 0) then "[any]" else "[" ++ show (ipaddrPort addr) ++ "]"
 
 showProtocol :: IPProto -> Int -> Int -> String
 showProtocol proto sport dport =
