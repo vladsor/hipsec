@@ -11,9 +11,9 @@ spdadd ::1 ::1 icmp6
 	esp/transport//require ;
 
 flush;
-#add 127.0.0.1 127.0.0.1 esp 0x1000
-#	-m transport
-#	-E des-cbc 0x3ffe05014819ffff;
+add 127.0.0.1 127.0.0.1 esp 0x1000
+	-m transport
+	-E des-cbc 0x3ffe05014819ffff;
 
 add 192.168.1.2 192.168.1.111 esp 0x10001
               -E des-cbc 0x3ffe05014819ffff
@@ -21,4 +21,3 @@ add 192.168.1.2 192.168.1.111 esp 0x10001
 add ::1 ::1 esp 0x1001
 	-m transport
 	-E des-cbc 0x3ffe05014819ffff;
-#flush;
