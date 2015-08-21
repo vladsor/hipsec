@@ -30,6 +30,7 @@ import           System.Socket              (AddressInfo (..), Stream, TCP,
                                              getAddressInfo)
 import           System.Socket.Family.Inet  (Inet, SocketAddressInet (..))
 import           System.Socket.Family.Inet6 (Inet6, SocketAddressInet6 (..))
+import qualified System.Socket.Family.Inet  as Inet
 import qualified System.Socket.Family.Inet6 as Inet6
 import qualified Text.Parsec                as P
 import qualified Text.Parsec.Prim           as P
@@ -328,9 +329,7 @@ cmdAdd = do
   addEncKey <- tokenKey
   (addAuthAlg, addAuthKey) <- P.option (AuthAlgNone, Key BS.empty) $ do
     tokenOption 'A'
-    alg <- liftM read tokenStringWithMinuses
-    key <- tokenKey
-    return (alg, key)
+    liftM2 (,) (liftM read tokenStringWithMinuses) tokenKey
   let addCompAlg = CompAlgNone
 
   return CommandAdd{..}
@@ -362,33 +361,17 @@ tokenSrcDst :: Parser (IPAddr, IPAddr)
 tokenSrcDst = (P.choice $ fmap P.try
   [ do
       SocketAddressInet src _ <- tokenIP4
-      sport <- P.optionMaybe $ do
-        tokenSqBrOpen
-        port <- tokenNumber
-        tokenSqBrClose
-        return $ fromIntegral port
+      sport <- P.optionMaybe $ P.between tokenSqBrOpen tokenSqBrClose $ liftM fromIntegral tokenNumber
       token "-"
       SocketAddressInet dst _ <- tokenIP4
-      dport <- P.optionMaybe $ do
-        tokenSqBrOpen
-        port <- tokenNumber
-        tokenSqBrClose
-        return $ fromIntegral port
+      dport <- P.optionMaybe $ P.between tokenSqBrOpen tokenSqBrClose $ liftM fromIntegral tokenNumber
       return (IPAddr4 $ SocketAddressInet src $ fromMaybe 0 sport, IPAddr4 $ SocketAddressInet dst $ fromMaybe 0 dport)
   , do
       src <- tokenIP6
-      sport <- P.optionMaybe $ do
-        tokenSqBrOpen
-        port <- tokenNumber
-        tokenSqBrClose
-        return $ fromIntegral port
+      sport <- P.optionMaybe $ P.between tokenSqBrOpen tokenSqBrClose $ liftM fromIntegral tokenNumber
       token "-"
       dst <- tokenIP6
-      dport <- P.optionMaybe $ do
-        tokenSqBrOpen
-        port <- tokenNumber
-        tokenSqBrClose
-        return $ fromIntegral port
+      dport <- P.optionMaybe $ P.between tokenSqBrOpen tokenSqBrClose $ liftM fromIntegral tokenNumber
       return (IPAddr6 $ src { Inet6.port = fromMaybe 0 sport }, IPAddr6 $ dst { Inet6.port = fromMaybe 0 dport })
   ]) P.<?> "range"
 
@@ -418,39 +401,27 @@ tokenPolicy = do
       let policyIPSecRequests = return IPSecRequest{..}
       return Policy{..}
 
-tokenAddressRange :: Parser (IPAddr, Int)
-tokenAddressRange = do
-  ip <- tokenIP4
-  P.choice [ return (IPAddr4 ip, 32)
-           , do
-                tokenSlash
-                pref <- tokenNumber
-                return (IPAddr4 ip, pref)
-           , do
-                tokenSqBrOpen
-                port <- tokenNumber
-                tokenSqBrClose
-                return (IPAddr4 ip, 32)
-           , do
-                tokenSlash
-                pref <- tokenNumber
-                tokenSqBrOpen
-                port <- tokenNumber
-                tokenSqBrClose
-                return (IPAddr4 ip, pref)
-           ]
-
 tokenAddressPair :: Parser AddressPair
 tokenAddressPair = do
   (apIPAddrPair, apSrcPrefixLen, apDstPrefixLen) <- (P.choice $ fmap P.try
     [ do
-      iapSrcAddr4 <- tokenIP4
-      iapDstAddr4 <- tokenIP4
-      return (IPAddrPair4{..}, 32, 32)
+      src <- tokenIP4
+      spfx <- P.option 32 $ tokenSlash >> tokenNumber
+      sport <- P.optionMaybe $ P.between tokenSqBrOpen tokenSqBrClose $ liftM fromIntegral tokenNumber
+      let iapSrcAddr4 = src { Inet.port = fromMaybe 0 sport }
+      dst <- tokenIP4
+      dpfx <- P.option 32 $ tokenSlash >> tokenNumber
+      dport <- P.optionMaybe $ P.between tokenSqBrOpen tokenSqBrClose $ liftM fromIntegral tokenNumber
+      let iapDstAddr4 = dst { Inet.port = fromMaybe 0 dport }
+      return (IPAddrPair4{..}, spfx, dpfx)
     , do
       iapSrcAddr6 <- tokenIP6
+      spfx <- P.option 128 $ tokenSlash >> tokenNumber
+      sport <- P.optionMaybe $ P.between tokenSqBrOpen tokenSqBrClose $ liftM fromIntegral tokenNumber
       iapDstAddr6 <- tokenIP6
-      return (IPAddrPair6{..}, 128, 128)
+      dpfx <- P.option 128 $ tokenSlash >> tokenNumber
+      dport <- P.optionMaybe $ P.between tokenSqBrOpen tokenSqBrClose $ liftM fromIntegral tokenNumber
+      return (IPAddrPair6{..}, spfx, dpfx)
     ]) P.<?> "addpress pair"
   apProto <- liftM read tokenString
   return AddressPair{..}
